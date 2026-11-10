@@ -233,6 +233,14 @@ local function mainSkillName()
 	return socketGroupLabel(group)
 end
 
+-- Passive points at the current level, assuming every quest reward was taken
+local function pointBudget()
+	local build = B()
+	local extra = build.calcsTab and build.calcsTab.mainOutput and build.calcsTab.mainOutput.ExtraPoints or 0
+	local level = build.characterLevel or 1
+	return math.min(level - 1, 99) + 23 + extra
+end
+
 local function info()
 	local build = B()
 	local spec = build.spec
@@ -250,6 +258,9 @@ local function info()
 		mainSocketGroup = build.mainSocketGroup,
 		passivePointsUsed = used,
 		ascendancyPointsUsed = ascUsed,
+		passivePointsAvailable = pointBudget(),
+		passivePointsRemaining = pointBudget() - used,
+		ascendancyPointsAvailable = 8,
 	}
 end
 
@@ -258,15 +269,17 @@ local function resolveNode(ref)
 	local id = tonumber(ref)
 	if id and spec.nodes[id] then return spec.nodes[id] end
 	local want = tostring(ref):lower()
-	local fallback
+	-- Several nodes can share a name (e.g. "Life Mastery"): prefer allocated, then
+	-- the one with the shortest path from the current tree
+	local best, bestScore
 	for _, node in pairs(spec.nodes) do
 		if node.dn and node.dn:lower() == want then
-			-- Prefer the reachable / non-ascendancy-cluster match
-			if node.path or node.alloc then return node end
-			fallback = fallback or node
+			local score = node.alloc and -1 or (node.path and #node.path or 10000)
+			if node.ascendancyName and node.ascendancyName ~= spec.curAscendClassName then score = score + 20000 end
+			if not bestScore or score < bestScore then best, bestScore = node, score end
 		end
 	end
-	return fallback
+	return best
 end
 
 local function nodeInfo(node)
@@ -390,10 +403,27 @@ end
 
 function API.slots()
 	local names = {}
-	for _, slot in ipairs(B().itemsTab.orderedSlots) do
-		if not slot.nodeId then names[#names + 1] = slot.slotName end
+	local itemsTab = B().itemsTab
+	local spec = B().spec
+	for _, slot in ipairs(itemsTab.orderedSlots) do
+		local shown = true
+		if slot.IsShown then
+			local ok, res = pcall(slot.IsShown, slot)
+			shown = not ok or res
+		end
+		if not slot.nodeId and shown then names[#names + 1] = slot.slotName end
 	end
-	return { slots = names }
+	local sockets = {}
+	for nodeId, slot in pairs(itemsTab.sockets) do
+		local node = spec.nodes[nodeId]
+		if node and node.alloc then
+			sockets[#sockets + 1] = { slot = slot.slotName, nodeId = nodeId,
+				occupied = slot.selItemId ~= 0 and slot.selItemId ~= nil }
+		end
+	end
+	table.sort(sockets, function(a, b) return a.nodeId < b.nodeId end)
+	return { slots = names, allocatedJewelSockets = sockets,
+		note = "Allocate a jewel socket node on the tree to get more 'Jewel <id>' slots" }
 end
 
 function API.tree()
@@ -442,7 +472,7 @@ function API.find_nodes(p)
 	local q = (p.query or ""):lower()
 	local res = {}
 	for _, node in pairs(spec.nodes) do
-		if node.dn and (node.type == "Notable" or node.type == "Keystone" or p.include_small or node.ascendancyName) then
+		if node.dn and (node.type == "Notable" or node.type == "Keystone" or node.type == "Socket" or p.include_small or node.ascendancyName) then
 			local hit = node.dn:lower():find(q, 1, true)
 			if not hit and p.search_stats then
 				for _, line in ipairs(node.sd or {}) do
@@ -558,6 +588,19 @@ local function getGroup(idx)
 	return group
 end
 
+-- Accepts "Mirage Archer", "Mirage Archer Support", any case
+local function normalizeGemName(name)
+	if type(name) ~= "string" then return name end
+	local data = B().data
+	local want = name:lower():gsub("^%s+", ""):gsub("%s+$", "")
+	local stripped = want:gsub(" support$", "")
+	for _, gem in pairs(data.gems) do
+		local n = gem.name:lower()
+		if n == want or n == stripped or n == stripped .. " support" then return gem.name end
+	end
+	return name
+end
+
 local function finishGroup(group)
 	local skillsTab = B().skillsTab
 	skillsTab:ProcessSocketGroup(group)
@@ -570,7 +613,7 @@ end
 function EDIT.add_gem(e, notes)
 	local group = getGroup(e.group)
 	table.insert(group.gemList, {
-		nameSpec = e.gem, level = e.level or 20, quality = e.quality or 0,
+		nameSpec = normalizeGemName(e.gem), level = e.level or 20, quality = e.quality or 0,
 		qualityId = "Default", enabled = true, enableGlobal1 = true, enableGlobal2 = true, count = 1,
 	})
 	finishGroup(group)
@@ -604,7 +647,7 @@ function EDIT.replace_gem(e, notes)
 	end
 	if not target then error("Gem to replace not found in group " .. tostring(e.group)) end
 	local old = target.nameSpec
-	target.nameSpec = e.new_gem
+	target.nameSpec = normalizeGemName(e.new_gem)
 	target.gemId = nil
 	target.skillId = nil
 	if e.level then target.level = e.level end
@@ -1000,12 +1043,515 @@ function API.warnings()
 			end
 		end
 	end
+	local used, ascUsed = build.spec:CountAllocNodes()
+	if used > pointBudget() then
+		add("points", ("%d passive points allocated but only %d available at level %d"):format(used, pointBudget(), build.characterLevel))
+	end
+	if ascUsed > 8 then add("points", ("%d ascendancy points allocated (max 8)"):format(ascUsed)) end
 	local env = build.calcsTab.mainEnv
 	local skill = env and env.player and env.player.mainSkill
-	if skill and skill.infoMessage then add("skill", skill.infoMessage) end
+	if skill and skill.infoMessage then add("info", skill.infoMessage) end
 	if skill and skill.disableReason then add("skill", "Main skill disabled: " .. skill.disableReason) end
 
 	return { count = #res, warnings = res }
+end
+
+-------------------------------------------------------------------------------
+-- Build creation: character, tree, skills, items
+-------------------------------------------------------------------------------
+
+local function findClass(name)
+	local spec = B().spec
+	local want = tostring(name):lower()
+	for classId, class in pairs(spec.tree.classes) do
+		if class.name:lower() == want then return classId, class end
+	end
+	return nil
+end
+
+local function findAscendancy(name)
+	local spec = B().spec
+	local want = tostring(name):lower()
+	for classId, class in pairs(spec.tree.classes) do
+		for ascId, asc in pairs(class.classes or {}) do
+			if ascId ~= 0 and asc.name and asc.name:lower() == want then
+				return classId, ascId, asc
+			end
+		end
+	end
+	return nil
+end
+
+local function selectClass(classId, notes)
+	local spec = B().spec
+	if spec.curClassId == classId then return end
+	local used = spec:CountAllocNodes()
+	if used > 0 and not spec:IsClassConnected(classId) then
+		spec:ResetNodes()
+		notes[#notes + 1] = "Passive tree reset (new class start is not connected to the old tree)"
+	end
+	spec:SelectClass(classId)
+	spec:AddUndoState()
+end
+
+function API.list_classes()
+	local spec = B().spec
+	local res = {}
+	for classId, class in pairs(spec.tree.classes) do
+		local ascs = {}
+		for ascId, asc in pairs(class.classes or {}) do
+			if ascId ~= 0 and asc.name then ascs[#ascs + 1] = asc.name end
+		end
+		table.sort(ascs)
+		res[#res + 1] = { id = classId, name = class.name, ascendancies = ascs,
+			base = { str = class.base_str, dex = class.base_dex, int = class.base_int } }
+	end
+	table.sort(res, function(a, b) return a.id < b.id end)
+	return { treeVersion = spec.treeVersion, classes = res }
+end
+
+function EDIT.set_class(e, notes)
+	local classId, class = findClass(e.class_name)
+	if not classId then error("Unknown class: " .. tostring(e.class_name) .. " (see list_classes)") end
+	selectClass(classId, notes)
+	notes[#notes + 1] = "Class set to " .. class.name
+end
+
+function EDIT.set_ascendancy(e, notes)
+	local spec = B().spec
+	local want = tostring(e.ascendancy):lower()
+	if want == "none" or want == "" then
+		spec:SelectAscendClass(0)
+		spec:AddUndoState()
+		notes[#notes + 1] = "Ascendancy cleared"
+		return
+	end
+	local classId, ascId, asc = findAscendancy(e.ascendancy)
+	if not classId then error("Unknown ascendancy: " .. tostring(e.ascendancy) .. " (see list_classes)") end
+	if classId ~= spec.curClassId then
+		selectClass(classId, notes)
+		notes[#notes + 1] = "Class set to " .. spec.tree.classes[classId].name
+	end
+	spec:SelectAscendClass(ascId)
+	spec:AddUndoState()
+	notes[#notes + 1] = "Ascendancy set to " .. asc.name
+end
+
+-- Masteries ------------------------------------------------------------------
+
+local function masteryOptions(node)
+	local spec = B().spec
+	local opts = {}
+	for _, effect in ipairs(node.masteryEffects or {}) do
+		local data = spec.tree.masteryEffects[effect.effect]
+		local takenBy = isValueInTable(spec.masterySelections, effect.effect)
+		opts[#opts + 1] = {
+			effectId = effect.effect,
+			text = table.concat(data and data.sd or effect.stats or {}, " / "),
+			selected = spec.masterySelections[node.id] == effect.effect,
+			available = (not takenBy) or takenBy == node.id,
+		}
+	end
+	return opts
+end
+
+function API.list_mastery_effects(p)
+	local spec = B().spec
+	local res = {}
+	if p.node then
+		local node = resolveNode(p.node)
+		if not node or node.type ~= "Mastery" then error("Not a mastery node: " .. tostring(p.node), 0) end
+		res[1] = { id = node.id, name = node.dn, allocated = node.alloc or false,
+			pathCost = node.path and #node.path or nil, effects = masteryOptions(node) }
+	else
+		-- Every mastery that can be allocated right now (adjacent to an allocated notable)
+		local seen = {}
+		for _, node in pairs(spec.nodes) do
+			if node.type == "Mastery" and node.masteryEffects and #node.masteryEffects > 0
+				and (node.alloc or (node.path and #node.path == 1)) and not seen[node.dn] then
+				seen[node.dn] = true
+				res[#res + 1] = { id = node.id, name = node.dn, allocated = node.alloc or false,
+					effects = masteryOptions(node) }
+			end
+		end
+		table.sort(res, function(a, b) return a.name < b.name end)
+	end
+	return { masteries = res }
+end
+
+function EDIT.set_mastery(e, notes)
+	local spec = B().spec
+	local node = resolveNode(e.node)
+	if not node or node.type ~= "Mastery" then error("Not a mastery node: " .. tostring(e.node)) end
+	if not node.alloc and not node.path then
+		error(node.dn .. " is not reachable; allocate an adjacent notable first")
+	end
+	local chosen
+	local wantId = tonumber(e.effect)
+	local wantText = tostring(e.effect or ""):lower()
+	for _, opt in ipairs(masteryOptions(node)) do
+		if opt.effectId == wantId or (not wantId and opt.text:lower():find(wantText, 1, true)) then
+			chosen = opt
+			break
+		end
+	end
+	if not chosen then error("No effect matching '" .. tostring(e.effect) .. "' on " .. node.dn .. " (see list_mastery_effects)") end
+	if not chosen.available then error("That effect is already used on another " .. node.dn) end
+	local effect = spec.tree.masteryEffects[chosen.effectId]
+	node.sd = effect.sd
+	node.allMasteryOptions = false
+	spec.tree:ProcessStats(node)
+	spec.masterySelections[node.id] = effect.id
+	local cost = 0
+	if not node.alloc then
+		cost = #node.path
+		spec:AllocNode(node)
+	end
+	spec:AddUndoState()
+	notes[#notes + 1] = ("%s: %s%s"):format(node.dn, chosen.text,
+		cost > 0 and (" (%d passive point%s)"):format(cost, cost == 1 and "" or "s") or "")
+end
+
+-- Skills ----------------------------------------------------------------------
+
+function API.search_gems(p)
+	local data = B().data
+	local q = (p.query or ""):lower()
+	local res = {}
+	for gemId, gem in pairs(data.gems) do
+		local ge = gem.grantedEffect
+		if ge and not ge.legacy and (p.include_vaal or not gem.name:match("^Vaal ")) then
+			local isSupport = ge.support and true or false
+			if p.support == nil or p.support == isSupport then
+				local tags = gem.tagString or ""
+				local lname = gem.name:lower()
+				-- 0 exact, 1 name prefix, 2 name contains, 3 tag match
+				local rank = (q == "" and 2) or (lname == q or lname == q .. " support") and 0
+					or (lname:sub(1, #q) == q and 1) or (lname:find(q, 1, true) and 2)
+					or (tags:lower():find(q, 1, true) and 3) or nil
+				local ok = rank ~= nil
+				if ok and p.tags then
+					for _, t in ipairs(p.tags) do
+						if not tags:lower():find(t:lower(), 1, true) then ok = false break end
+					end
+				end
+				if ok then
+					res[#res + 1] = {
+						rank = rank,
+						name = gem.name, support = isSupport, tags = tags,
+						maxLevel = gem.naturalMaxLevel,
+						attribute = (gem.reqStr or 0) >= 50 and "str" or (gem.reqDex or 0) >= 50 and "dex"
+							or (gem.reqInt or 0) >= 50 and "int" or "none",
+						description = ge.description and cleanText(ge.description) or nil,
+					}
+				end
+			end
+		end
+	end
+	table.sort(res, function(a, b)
+		if a.rank ~= b.rank then return a.rank < b.rank end
+		return a.name < b.name
+	end)
+	for _, r in ipairs(res) do r.rank = nil end
+	local total = #res
+	local limit = p.limit or 30
+	while #res > limit do table.remove(res) end
+	return { total = total, gems = res }
+end
+
+function EDIT.create_socket_group(e, notes)
+	local build = B()
+	local skillsTab = build.skillsTab
+	if e.slot and not build.itemsTab.slots[e.slot] then
+		error("Unknown slot: " .. tostring(e.slot) .. " (see list_item_slots)")
+	end
+	local group = { label = e.label or "", enabled = e.enabled ~= false, slot = e.slot,
+		includeInFullDPS = e.include_in_full_dps or false, gemList = {} }
+	for _, name in ipairs(e.gems or {}) do
+		group.gemList[#group.gemList + 1] = {
+			nameSpec = normalizeGemName(name), level = 20, quality = e.quality or 20, qualityId = "Default",
+			enabled = true, enableGlobal1 = true, enableGlobal2 = true, count = 1,
+		}
+	end
+	table.insert(skillsTab.socketGroupList, group)
+	local idx = #skillsTab.socketGroupList
+	skillsTab:ProcessSocketGroup(group)
+	for _, g in ipairs(group.gemList) do
+		if g.errMsg then
+			table.remove(skillsTab.socketGroupList, idx)
+			error(("Gem '%s': %s"):format(tostring(g.nameSpec), cleanText(g.errMsg)))
+		end
+		-- Use the gem's normal max level rather than a blanket 20
+		if g.gemData and not e.level then g.level = skillsTab:ProcessGemLevel(g.gemData) end
+		if e.level then g.level = e.level end
+	end
+	skillsTab:ProcessSocketGroup(group)
+	skillsTab:AddUndoState()
+	if e.set_main or #skillsTab.socketGroupList == 1 then
+		build.mainSocketGroup = idx
+		notes[#notes + 1] = ("Created group %d (%s) and made it the main skill"):format(idx, socketGroupLabel(group))
+	else
+		notes[#notes + 1] = ("Created group %d (%s)"):format(idx, socketGroupLabel(group))
+	end
+end
+
+function EDIT.delete_socket_group(e, notes)
+	local build = B()
+	local list = build.skillsTab.socketGroupList
+	local idx = tonumber(e.group)
+	local group = getGroup(idx)
+	local label = socketGroupLabel(group)
+	table.remove(list, idx)
+	if build.mainSocketGroup == idx then build.mainSocketGroup = 1
+	elseif build.mainSocketGroup > idx then build.mainSocketGroup = build.mainSocketGroup - 1 end
+	build.skillsTab:AddUndoState()
+	notes[#notes + 1] = ("Deleted group %d (%s); later groups shift up by one"):format(idx, label)
+end
+
+-- Items -------------------------------------------------------------------------
+
+local function itemSlotType(item)
+	return item.base and (item.base.type) or item.type
+end
+
+function API.search_uniques(p)
+	local q = (p.query or ""):lower()
+	local wantType = p.item_type and p.item_type:lower()
+	local res = {}
+	for _, item in pairs(main.uniqueDB.list) do
+		local t = itemSlotType(item) or ""
+		if not wantType or t:lower():find(wantType, 1, true) then
+			local hit = q == "" or item.title:lower():find(q, 1, true) or item.baseName:lower():find(q, 1, true)
+			local lines = {}
+			for _, ml in ipairs(item.explicitModLines or {}) do
+				lines[#lines + 1] = cleanText(ml.line)
+				if not hit and p.search_mods and ml.line:lower():find(q, 1, true) then hit = true end
+			end
+			if hit then
+				res[#res + 1] = { name = item.title, base = item.baseName, type = t,
+					levelReq = item.requirements and item.requirements.level or nil,
+					variants = item.variantList, mods = p.include_mods ~= false and lines or nil }
+			end
+		end
+	end
+	table.sort(res, function(a, b) return a.name < b.name end)
+	local total = #res
+	local limit = p.limit or 20
+	while #res > limit do table.remove(res) end
+	return { total = total, uniques = res }
+end
+
+function API.search_item_bases(p)
+	local q = (p.query or ""):lower()
+	local wantType = p.item_type and p.item_type:lower()
+	local res = {}
+	for name, base in pairs(B().data.itemBases) do
+		local t = base.type or ""
+		if (not wantType or t:lower():find(wantType, 1, true) or (base.subType or ""):lower():find(wantType, 1, true))
+			and (q == "" or name:lower():find(q, 1, true)) and not base.hidden then
+			local entry = { name = name, type = t, subType = base.subType, implicit = base.implicit,
+				levelReq = base.req and base.req.level or nil }
+			if base.armour then
+				entry.defences = {}
+				for k, v in pairs(base.armour) do
+					if type(v) == "number" then entry.defences[k] = v end
+				end
+			end
+			if base.weapon then
+				entry.weapon = {}
+				for k, v in pairs(base.weapon) do
+					if type(v) == "number" then entry.weapon[k] = v end
+				end
+			end
+			res[#res + 1] = entry
+		end
+	end
+	table.sort(res, function(a, b)
+		if (a.levelReq or 0) ~= (b.levelReq or 0) then return (a.levelReq or 0) > (b.levelReq or 0) end
+		return a.name < b.name
+	end)
+	local total = #res
+	local limit = p.limit or 25
+	while #res > limit do table.remove(res) end
+	return { total = total, bases = res }
+end
+
+local function equipParsed(item, slotName, notes, what)
+	local itemsTab = B().itemsTab
+	local slot = itemsTab.slots[slotName]
+	if not slot then error("Unknown item slot: " .. tostring(slotName) .. " (see list_item_slots)") end
+	if slot.nodeId and not B().spec.nodes[slot.nodeId].alloc then
+		error(slotName .. " is a tree jewel socket that is not allocated")
+	end
+	if not itemsTab:IsItemValidForSlot(item, slotName) then
+		error(("%s can't go in %s"):format(item.name or "Item", slotName))
+	end
+	itemsTab:AddItem(item, true)
+	slot:SetSelItemId(item.id)
+	itemsTab:PopulateSlots()
+	itemsTab:AddUndoState()
+	notes[#notes + 1] = ("Equipped %s%s in %s"):format(item.name or "item", what or "", slotName)
+end
+
+function EDIT.equip_unique(e, notes)
+	local want = tostring(e.name):lower()
+	local src = main.uniqueDB.byTitle[want]
+	if not src then
+		for _, item in pairs(main.uniqueDB.list) do
+			if item.title:lower() == want or item.name:lower():find(want, 1, true) == 1 then src = item break end
+		end
+	end
+	if not src then error("Unique not found: " .. tostring(e.name) .. " (see search_uniques)") end
+	local item = new("Item"):Item(src:BuildRaw())
+	local note = ""
+	if e.variant and item.variantList then
+		local vi = tonumber(e.variant)
+		if not vi then
+			for i, v in ipairs(item.variantList) do
+				if v:lower():find(tostring(e.variant):lower(), 1, true) then vi = i break end
+			end
+		end
+		if not vi or not item.variantList[vi] then error("Variant not found: " .. tostring(e.variant)) end
+		item.variant = vi
+		note = " (" .. item.variantList[vi] .. ")"
+	end
+	item:NormaliseQuality()
+	item:BuildModList()
+	equipParsed(item, e.slot, notes, note)
+end
+
+function EDIT.create_rare(e, notes)
+	local data = B().data
+	local base = data.itemBases[e.base]
+	if not base then
+		for name, b in pairs(data.itemBases) do
+			if name:lower() == tostring(e.base):lower() then base = b e.base = name break end
+		end
+	end
+	if not base then error("Unknown item base: " .. tostring(e.base) .. " (see search_item_bases)") end
+	local lines = { "Rarity: " .. (e.rarity or "RARE"), e.name or "Crafted Item", e.base }
+	lines[#lines + 1] = "Item Level: " .. tostring(e.item_level or 86)
+	if e.quality then lines[#lines + 1] = "Quality: " .. tostring(e.quality) end
+	if e.sockets then lines[#lines + 1] = "Sockets: " .. e.sockets end
+	local implicits = e.implicits
+	if implicits == nil and base.implicit then
+		implicits = {}
+		for line in base.implicit:gmatch("[^\n]+") do implicits[#implicits + 1] = line end
+	end
+	lines[#lines + 1] = "Implicits: " .. tostring(#(implicits or {}))
+	for _, l in ipairs(implicits or {}) do lines[#lines + 1] = l end
+	for _, l in ipairs(e.mods or {}) do lines[#lines + 1] = l end
+	local item = new("Item"):Item(table.concat(lines, "\n"))
+	if not item.base then error("Could not build item from base " .. e.base) end
+	-- Report mod lines PoB could not parse, so the agent can fix wording
+	local unsupported = {}
+	for _, ml in ipairs(item.explicitModLines or {}) do
+		if ml.extra then unsupported[#unsupported + 1] = ml.line end
+	end
+	item:NormaliseQuality()
+	item:BuildModList()
+	equipParsed(item, e.slot, notes)
+	if #unsupported > 0 then
+		notes[#notes + 1] = "Warning: PoB does not understand these mod lines: " .. table.concat(unsupported, " | ")
+	end
+end
+
+-- Greedy passive allocation ----------------------------------------------------
+
+local function weightedScore(weights, bases, out)
+	local score = 0
+	for stat, w in pairs(weights) do
+		local v = readStat(out, stat)
+		local b = bases[stat]
+		if v and b then
+			if b ~= 0 then
+				score = score + w * (v - b) / math.abs(b) * 100
+			elseif v > 0 then
+				score = score + w * 100
+			end
+		end
+	end
+	return score
+end
+
+function API.auto_allocate(p)
+	local build = B()
+	local spec = build.spec
+	local weights = p.weights
+	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
+	local budget = p.points or (pointBudget() - spec:CountAllocNodes())
+	local maxCost = p.max_path_cost or 6
+	local shortlist = p.shortlist or 12
+	local deadline = os.clock() + (p.max_seconds or 40)
+	local chosen, spent, stopReason = {}, 0, nil
+	local granted = {}
+	local avoid = {}
+	for _, n in ipairs(p.avoid or {}) do avoid[tostring(n):lower()] = true end
+
+	-- Validate stats up front
+	do
+		local _, base = build.calcsTab:GetMiscCalculator()
+		for stat in pairs(weights) do
+			if readStat(base, stat) == nil then
+				error(("Unknown or non-numeric stat '%s'"):format(stat), 0)
+			end
+		end
+	end
+
+	while spent < budget do
+		if os.clock() > deadline then
+			stopReason = "time limit reached; progress is kept, call auto_allocate again to continue"
+			break
+		end
+		local calcFunc, base = build.calcsTab:GetMiscCalculator()
+		granted = build.calcsTab.mainEnv.grantedPassives or {}
+		local bases = {}
+		for stat in pairs(weights) do bases[stat] = readStat(base, stat) end
+		local remaining = budget - spent
+		local useFull = weights.FullDPS ~= nil
+
+		-- Pass 1: node on its own (cached by identical mods), normalised by path cost
+		local cands, cache = {}, {}
+		for _, node in pairs(spec.nodes) do
+			if not node.alloc and node.path and #node.path > 0 and #node.path <= math.min(maxCost, remaining)
+				and node.dn and node.modKey ~= "" and not granted[node.id] and not node.ascendancyName
+				and (node.type == "Notable" or (p.include_keystones and node.type == "Keystone")
+					or (p.include_small and node.type == "Normal"))
+				and not avoid[node.dn:lower()] then
+				local key = node.modKey
+				if cache[key] == nil then
+					cache[key] = weightedScore(weights, bases, calcFunc({ addNodes = { [node] = true } }, useFull))
+				end
+				cands[#cands + 1] = { node = node, est = cache[key] / #node.path }
+			end
+		end
+		if #cands == 0 then stopReason = "no reachable candidates within budget" break end
+		table.sort(cands, function(a, b) return a.est > b.est end)
+
+		-- Pass 2: exact value of the whole path for the shortlist
+		local best, bestScore
+		for i = 1, math.min(shortlist, #cands) do
+			local node = cands[i].node
+			local set = {}
+			for _, pn in ipairs(node.path) do set[pn] = true end
+			local sc = weightedScore(weights, bases, calcFunc({ addNodes = set }, useFull)) / #node.path
+			if not bestScore or sc > bestScore then best, bestScore = node, sc end
+		end
+		if not best or bestScore <= 0 then stopReason = "no remaining node improves the weighted stats" break end
+
+		local cost = #best.path
+		spec:AllocNode(best)
+		spent = spent + cost
+		rebuild()
+		chosen[#chosen + 1] = { name = best.dn, type = best.type, cost = cost,
+			scorePerPoint = math.floor(bestScore * 100 + 0.5) / 100 }
+	end
+	spec:AddUndoState()
+
+	local after = {}
+	for stat in pairs(weights) do after[stat] = readStat(output(), stat) end
+	return { weights = weights, pointsBudget = budget, pointsSpent = spent,
+		allocated = chosen, stoppedBecause = stopReason or "budget used", stats = after, info = info() }
 end
 
 -------------------------------------------------------------------------------

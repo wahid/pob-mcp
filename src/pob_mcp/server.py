@@ -31,6 +31,11 @@ mcp = FastMCP(
         "load_build (share code, pobb.in / pastebin / poe.ninja link, XML, or .xml file path). "
         "Use compare_changes to test ideas without changing the build, apply_changes to keep "
         "them, undo_last_change to roll back, and export_build to get a share code. "
+        "To create a build from scratch: new_build(ascendancy, level), then apply_changes with "
+        "create_socket_group / equip_unique / create_rare / allocate_node / set_mastery edits, "
+        "auto_allocate_passives for the remaining points, and get_warnings to find gaps "
+        "(resists, attributes, reservation) to fix. search_gems, search_uniques, "
+        "search_item_bases, list_classes and find_passive_nodes look up game data. "
         "All numbers come from Path of Building's own calculation engine."
     ),
 )
@@ -58,11 +63,18 @@ def _call(method: str, params: dict | None = None, need_build: bool = True) -> A
 # ---------------------------------------------------------------------------
 
 EditOp = Literal[
-    "allocate_node", "deallocate_node",
-    "equip_item", "unequip_slot",
+    # character
+    "set_class", "set_ascendancy", "set_level",
+    # passive tree
+    "allocate_node", "deallocate_node", "set_mastery",
+    # skills
+    "create_socket_group", "delete_socket_group",
     "add_gem", "remove_gem", "replace_gem", "set_gem",
     "set_main_skill", "set_group_enabled",
-    "set_config", "set_level", "add_custom_mod",
+    # items
+    "equip_item", "equip_unique", "create_rare", "unequip_slot",
+    # configuration
+    "set_config", "add_custom_mod",
 ]
 
 
@@ -70,20 +82,40 @@ class Edit(BaseModel):
     """One change to the build. Fill only the fields the chosen `op` uses."""
 
     op: EditOp = Field(description=(
-        "allocate_node/deallocate_node: node. "
-        "equip_item: slot + item_text. unequip_slot: slot. "
+        "CHARACTER  set_class: class_name. set_ascendancy: ascendancy (also sets the class; 'None' clears). "
+        "set_level: level. "
+        "TREE  allocate_node/deallocate_node: node (allocating takes the shortest path; works for "
+        "ascendancy nodes and jewel sockets). set_mastery: node (mastery name, e.g. 'Life Mastery') + "
+        "effect (text fragment or effectId from list_mastery_effects). "
+        "SKILLS  create_socket_group: gems (list, active skill first) + optional slot, label, set_main, "
+        "include_in_full_dps, level, quality. delete_socket_group: group. "
         "add_gem: group + gem (+level, quality). remove_gem: group + gem or gem_index. "
-        "replace_gem: group + (old_gem or gem_index) + new_gem (+level, quality). "
-        "set_gem: group + gem_index + any of level/quality/enabled. "
-        "set_main_skill: group (+skill_part). set_group_enabled: group + enabled and/or include_in_full_dps. "
-        "set_config: var + value (see list_config_options). set_level: level. "
-        "add_custom_mod: mod (a modifier line, e.g. '10% more Damage')."
+        "replace_gem: group + (old_gem or gem_index) + new_gem. set_gem: group + gem_index + "
+        "level/quality/enabled. set_main_skill: group (+skill_part). "
+        "set_group_enabled: group + enabled and/or include_in_full_dps. "
+        "ITEMS  equip_unique: name + slot (+variant). create_rare: slot + base + mods (list of mod "
+        "lines) + optional name, implicits (default: the base's implicit), item_level, quality, sockets. "
+        "equip_item: slot + item_text (pasted item). unequip_slot: slot. "
+        "CONFIG  set_config: var + value (see list_config_options). add_custom_mod: mod."
     ))
     node: Optional[str] = Field(None, description="Passive node name or numeric id")
-    slot: Optional[str] = Field(None, description="Item slot, e.g. 'Ring 1', 'Body Armour' (see list_item_slots)")
+    class_name: Optional[str] = Field(None, description="Class, e.g. 'Ranger' (see list_classes)")
+    ascendancy: Optional[str] = Field(None, description="Ascendancy, e.g. 'Deadeye' (see list_classes)")
+    effect: Optional[str] = Field(None, description="Mastery effect text fragment or effectId")
+    slot: Optional[str] = Field(None, description="Item slot, e.g. 'Ring 1', 'Body Armour', 'Jewel 26725' (see list_item_slots)")
     item_text: Optional[str] = Field(None, description="Item text as copied from the game (Ctrl+C) or PoB")
+    name: Optional[str] = Field(None, description="equip_unique: unique name. create_rare: item name")
+    variant: Optional[str] = Field(None, description="Unique variant name fragment or number")
+    base: Optional[str] = Field(None, description="Item base type, e.g. 'Thicket Bow' (see search_item_bases)")
+    mods: Optional[list[str]] = Field(None, description="Explicit mod lines, written as in-game, e.g. '+90 to maximum Life'")
+    implicits: Optional[list[str]] = Field(None, description="Implicit mod lines; omit to use the base's implicit")
+    item_level: Optional[int] = None
+    sockets: Optional[str] = Field(None, description="Socket string, e.g. 'G-G-G-G-G-G'")
+    gems: Optional[list[str]] = Field(None, description="Gem names for create_socket_group, active skill first")
+    label: Optional[str] = None
+    set_main: Optional[bool] = Field(None, description="Make the new group the main skill")
     group: Optional[int] = Field(None, description="Socket group index from get_skills")
-    gem: Optional[str] = Field(None, description="Gem name")
+    gem: Optional[str] = Field(None, description="Gem name ('Support' suffix optional)")
     gem_index: Optional[int] = Field(None, description="Gem index within the group (from get_skills)")
     old_gem: Optional[str] = None
     new_gem: Optional[str] = None
@@ -120,11 +152,29 @@ def load_build(source: str, name: str | None = None) -> dict:
 
 
 @mcp.tool()
-def new_build() -> dict:
-    """Start an empty level-1 build (Scion, no tree, no items)."""
-    res = _engine().call("new_build")
-    _engine().loaded = True
+def new_build(ascendancy: str | None = None, class_name: str | None = None,
+              level: int | None = None) -> dict:
+    """Start an empty build, optionally with an ascendancy (which also sets the class),
+    a class, and a character level (default 1). Returns the point budget for that level.
+
+    Typical flow for creating a build: new_build -> create_socket_group (main skill, set_main)
+    -> equip_unique / create_rare for gear -> allocate ascendancy notables -> allocate key
+    passives/keystones -> auto_allocate_passives -> set_mastery -> get_warnings -> fix resists
+    and attributes -> export_build.
+    """
+    e = _engine()
+    res = e.call("new_build")
+    e.loaded = True
     _history.clear()
+    edits = []
+    if class_name:
+        edits.append({"op": "set_class", "class_name": class_name})
+    if ascendancy:
+        edits.append({"op": "set_ascendancy", "ascendancy": ascendancy})
+    if level:
+        edits.append({"op": "set_level", "level": level})
+    if edits:
+        res = e.call("apply_edits", {"edits": edits})["info"]
     return res
 
 
@@ -196,7 +246,8 @@ def get_items(include_text: bool = True) -> dict:
 
 @mcp.tool()
 def list_item_slots() -> dict:
-    """Valid slot names for equip_item / unequip_slot."""
+    """Valid slot names for equipping items, plus allocated tree jewel sockets
+    ('Jewel <nodeId>')."""
     return _call("slots")
 
 
@@ -210,7 +261,7 @@ def get_passive_tree() -> dict:
 @mcp.tool()
 def find_passive_nodes(query: str, search_stats: bool = False, include_small: bool = False,
                        limit: int = 25) -> dict:
-    """Search notables/keystones (and your ascendancy's nodes) by name, or by stat text
+    """Search notables, keystones, jewel sockets (and your ascendancy's nodes) by name, or by stat text
     with search_stats=true. Unallocated results come first, sorted by how many points
     the path from your current tree costs (pathCost)."""
     return _call("find_nodes", {"query": query, "search_stats": search_stats,
@@ -342,6 +393,87 @@ def get_warnings() -> dict:
     negative chaos resist, unmet attribute requirements, over-reservation, gem errors and
     a disabled main skill."""
     return _call("warnings")
+
+
+# ---------------------------------------------------------------------------
+# Tools: build creation helpers
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_classes() -> dict:
+    """All classes with their ascendancies and starting attributes."""
+    return _call("list_classes")
+
+
+@mcp.tool()
+def search_gems(query: str = "", tags: list[str] | None = None, support: bool | None = None,
+                include_vaal: bool = False, limit: int = 30) -> dict:
+    """Search skill and support gems by name or tag text, e.g. query="lightning",
+    tags=["Bow", "Projectile"], support=true for supports only. Returns tags, main
+    attribute and a description."""
+    return _call("search_gems", {"query": query, "tags": tags, "support": support,
+                                 "include_vaal": include_vaal, "limit": limit})
+
+
+@mcp.tool()
+def search_uniques(query: str = "", item_type: str | None = None, search_mods: bool = False,
+                   include_mods: bool = True, limit: int = 20) -> dict:
+    """Search PoB's unique item database by name or base; with search_mods=true also by mod
+    text (e.g. "critical strike chance"). item_type filters by type, e.g. "Boots", "Bow",
+    "Jewel", "Ring". Equip results with an equip_unique edit."""
+    return _call("search_uniques", {"query": query, "item_type": item_type,
+                                    "search_mods": search_mods, "include_mods": include_mods,
+                                    "limit": limit})
+
+
+@mcp.tool()
+def search_item_bases(query: str = "", item_type: str | None = None, limit: int = 25) -> dict:
+    """Search item base types (for create_rare) by name and/or type, e.g. item_type="Bow",
+    "Body Armour", "Ring", "Jewel". Highest level bases first, with implicits, defences or
+    weapon stats."""
+    return _call("search_item_bases", {"query": query, "item_type": item_type, "limit": limit})
+
+
+@mcp.tool()
+def list_mastery_effects(node: str | None = None) -> dict:
+    """Mastery effects. With `node` (e.g. "Life Mastery"), the options for that mastery;
+    without, every mastery you can allocate right now (adjacent to an allocated notable).
+    Each mastery costs one passive point. Apply with a set_mastery edit."""
+    return _call("list_mastery_effects", {"node": node})
+
+
+@mcp.tool()
+def auto_allocate_passives(
+    weights: dict[str, float] | None = None,
+    points: int | None = None,
+    max_path_cost: int = 6,
+    include_keystones: bool = False,
+    include_small: bool = False,
+    avoid: list[str] | None = None,
+    max_seconds: int = 40,
+) -> dict:
+    """Spend passive points automatically with a greedy optimiser that uses PoB's calculator.
+
+    Each step evaluates every reachable notable (with its path) and takes the one with the
+    best weighted gain per point. `weights` maps stats to importance, scored on % change,
+    e.g. {"FullDPS": 1, "TotalEHP": 0.5} (default: main DPS 1 + TotalEHP 0.5). `points`
+    defaults to all remaining points at the current level.
+
+    Allocate build-defining picks (keystones, specific notables, ascendancy) yourself first;
+    keystones are excluded here unless include_keystones=true. Masteries are not chosen
+    automatically. If it hits the time limit the progress is kept; call it again to continue.
+    Use undo_last_change to revert the whole run.
+    """
+    snapshot = _call("export_xml")["xml"]
+    res = _call("auto_allocate", {
+        "weights": weights, "points": points, "max_path_cost": max_path_cost,
+        "include_keystones": include_keystones, "include_small": include_small,
+        "avoid": avoid or [], "max_seconds": max_seconds,
+    })
+    _history.append(snapshot)
+    del _history[:-_MAX_HISTORY]
+    res["undo_available"] = len(_history)
+    return res
 
 
 # ---------------------------------------------------------------------------

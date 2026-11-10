@@ -9,30 +9,57 @@ for the same build and config.
 
 ## Tools
 
+**Reading and evaluating**
+
 | Tool | What it does |
 |---|---|
 | `load_build` | Load a share code, pobb.in / pastebin / poe.ninja / poedb link, raw XML, or a `.xml` file |
-| `new_build` | Start an empty build |
-| `get_build_summary` | Class, ascendancy, level, main skill + headline stats |
+| `get_build_summary` | Class, ascendancy, level, point budget, main skill + headline stats |
 | `get_stats` | Any stat from PoB's output table, by exact name or substring filter |
 | `get_skills` | Socket groups and gems (indexes used by edits) |
 | `get_items` | Equipped gear, flasks and tree jewels, with full item text |
-| `list_item_slots` | Valid slot names |
 | `get_passive_tree` | Keystones, notables, masteries, ascendancy nodes, tree URL |
-| `find_passive_nodes` | Search nodes by name or stat text, sorted by path cost from your tree |
 | `get_config` / `list_config_options` | Current Configuration tab values / all options and choices |
+| `get_warnings` | PoB's own warnings plus uncapped resists, unmet requirements, over-reservation, point overspend, gem errors |
+
+**Changing and optimising**
+
+| Tool | What it does |
+|---|---|
 | `compare_changes` | **What-if**: apply edits, report stat deltas, then restore the build |
 | `apply_changes` | Apply edits and keep them |
-| `undo_last_change` | Roll back the last `apply_changes` |
-| `export_build` | Share code or XML, optionally saved to a file |
+| `undo_last_change` | Roll back the last `apply_changes` or `auto_allocate_passives` |
 | `rank_passives` | Rank reachable notables/keystones by gain per point (or allocated ones by least value, for respecs) for any stat |
 | `rank_support_gems` | Rank every compatible support gem for a link, as an extra gem or as a replacement, plus what each current support contributes |
-| `get_warnings` | PoB's own warnings plus uncapped resists, unmet requirements, over-reservation, gem errors |
+| `export_build` | Share code or XML, optionally saved to a file |
 
-Edit operations (used by `compare_changes` / `apply_changes`):
-`allocate_node`, `deallocate_node`, `equip_item`, `unequip_slot`, `add_gem`, `remove_gem`,
-`replace_gem`, `set_gem`, `set_main_skill`, `set_group_enabled`, `set_config`, `set_level`,
-`add_custom_mod`.
+**Creating builds**
+
+| Tool | What it does |
+|---|---|
+| `new_build` | Empty build, optionally with ascendancy (sets the class too), class and level |
+| `list_classes` | Classes, ascendancies and starting attributes |
+| `search_gems` | Skill and support gems by name or tags, with descriptions |
+| `search_uniques` | PoB's unique database by name, base, type or mod text |
+| `search_item_bases` | Item bases for crafting rares, with implicits and base stats |
+| `find_passive_nodes` | Notables, keystones, jewel sockets and ascendancy nodes by name or stat text, with path cost |
+| `list_mastery_effects` | Mastery options, for one mastery or every one you can allocate now |
+| `list_item_slots` | Gear slots plus allocated tree jewel sockets |
+| `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}` |
+
+### Edit operations
+
+Used by `compare_changes` and `apply_changes`. Several edits can go in one call.
+
+| Area | Operations |
+|---|---|
+| Character | `set_class`, `set_ascendancy`, `set_level` |
+| Passive tree | `allocate_node` (shortest path; works for ascendancy nodes and jewel sockets), `deallocate_node`, `set_mastery` |
+| Skills | `create_socket_group`, `delete_socket_group`, `add_gem`, `remove_gem`, `replace_gem`, `set_gem`, `set_main_skill`, `set_group_enabled` |
+| Items | `equip_unique`, `create_rare` (base + mod lines; reports lines PoB can't parse), `equip_item` (pasted item text), `unequip_slot` |
+| Config | `set_config`, `add_custom_mod` |
+
+Gem names work with or without the "Support" suffix.
 
 ## Setup
 
@@ -86,6 +113,8 @@ server looks in `~/PathOfBuilding`.
 - "Compare my current ring with this one: (pasted item text)."
 - "Swap Controlled Destruction for Elemental Focus in my main link and show the difference against a Pinnacle boss."
 - "Apply those changes and give me the new share code."
+- "Create a level 95 Elementalist Arc build with a Tabula Rasa, cap my resists, and give me the share code."
+- "Make a Deadeye Lightning Arrow build that balances damage and EHP, then tell me what gear to look for."
 
 ## How it works
 
@@ -119,10 +148,30 @@ MCP client ⇄ stdio ⇄ server.py (FastMCP/MCPServer)
 - `Inflate`/`Deflate` use Python's zlib.
 - Nothing is written to stdout except MCP traffic; PoB's console output goes to stderr.
 
+### How an agent creates a build
+
+1. `new_build` with an ascendancy and level.
+2. `search_gems`, then a `create_socket_group` edit with `set_main` for the main skill, plus
+   groups for auras, movement and so on.
+3. Gear: `search_uniques` + `equip_unique`, or `search_item_bases` + `create_rare` with the mods
+   it wants (resists, life, damage). Rares can be any combination of real mod lines, so the
+   result is a target to trade or craft for, not a specific item that exists.
+4. Ascendancy notables, keystones and must-have notables with `allocate_node`.
+5. `auto_allocate_passives` for the remaining points, then `set_mastery` (each costs a point).
+6. `get_warnings`, fix resists, attributes and reservation, and repeat.
+7. `export_build` for the share code.
+
+`auto_allocate_passives` is greedy: it picks the best notable per point one step at a time,
+which is fast and usually good, but it doesn't plan long paths toward distant clusters. Guide
+it by allocating a few target notables first, or using `avoid`. A full tree takes 15–40
+seconds; if it reaches its time limit, the progress is kept and calling it again continues.
+
 ## Limitations
 
 - PoE1 / PoB Community only (not PoB for PoE2).
 - No character import from the PoE website (load a build code or XML instead).
-- Mastery selection, cluster jewel contents and timeless-jewel seeds are read from the
-  build but can't be edited with the edit ops; edit them in PoB, or use `add_custom_mod`
-  to approximate a stat.
+- Cluster jewel notables and timeless-jewel seeds can't be edited with the edit ops; edit
+  them in PoB, or use `add_custom_mod` to approximate a stat.
+- `create_rare` accepts any mod lines, including combinations that can't roll together in
+  the game. Treat crafted rares as targets.
+- Weapon swap slots are hidden from `list_item_slots`.

@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: audits-existing-build-config
+expected_outcome: |
+  The build is loaded and judged: inflated config conditions are named, mapping vs boss vs uber numbers are compared, defenses are checked against benchmarks, and the biggest improvements are quantified with compare_changes.

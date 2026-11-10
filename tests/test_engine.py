@@ -306,3 +306,25 @@ def test_cluster_jewels(engine):
     with pytest.raises(PobError, match="can't roll"):
         edit(engine, {"op": "create_cluster_jewel", "socket": "Jewel 7960", "skill": "Fire Damage",
                       "notables": ["Heart of Oak"]})
+
+
+def test_game_data_overviews(engine):
+    engine.call("new_build")
+    asc = engine.call("ascendancy_notables", {"ascendancy": "Deadeye"})["ascendancies"]
+    assert len(asc) == 1 and asc[0]["class"] == "Ranger" and asc[0]["notables"]
+    allasc = engine.call("ascendancy_notables", {})["ascendancies"]
+    assert {"Juggernaut", "Necromancer", "Champion"} <= {a["ascendancy"] for a in allasc}
+    keys = {k["name"] for k in engine.call("keystones")["keystones"]}
+    assert {"Chaos Inoculation", "Resolute Technique"} <= keys
+
+
+def test_damage_type_breakdown_and_life_reservation(engine):
+    engine.call("new_build")
+    engine.call("apply_edits", {"edits": [
+        {"op": "set_level", "level": 90},
+        {"op": "create_socket_group", "set_main": True, "gems": ["Fireball"]},
+        {"op": "create_socket_group", "gems": ["Wrath", "Arrogance"]}]})
+    br = engine.call("explain_stat", {"stat": "Fire"})["breakdown"]
+    assert any("Base damage" in line for line in br)
+    msgs = [w["message"] for w in engine.call("warnings")["warnings"]]
+    assert any("of life is reserved" in m for m in msgs)

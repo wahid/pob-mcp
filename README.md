@@ -40,6 +40,8 @@ for the same build and config.
 | `trade_search` | A pathofexile.com trade search for upgrades in a slot: every mod that can roll there is weighted by its PoB-calculated value |
 | `price_check` | poe.ninja prices for uniques, or for everything unique the build wears |
 | `rank_anoints` | Every anointable notable ranked by its value on this build, with the oils needed |
+| `list_ascendancy_notables` | Every ascendancy's notables (or one) with exact stats, read live from PoB |
+| `list_keystones` | All keystones with their stats, allocation and path cost |
 | `export_build` | Share code or XML, optionally saved to a file |
 | `save_to_pob` | Save into PoB's Builds folder so it shows up in the PoB app |
 
@@ -237,6 +239,20 @@ offline.
   trade site itself.
 - **Character import** uses the same public profile pages as PoB's Import tab, so the
   profile's Characters tab must be public. Account names need their `#1234` suffix.
+
+## Build-designer skill
+
+`skills/pob-build-designer/` is a Claude skill that teaches build making: picking a concept
+with enough power, scaling damage through the right buckets, layering defenses against
+community benchmarks, realistic gear, and spotting inflated PoB numbers. It drives the
+tools above step by step and reads game data live (`list_ascendancy_notables`,
+`list_keystones`, `list_item_mods`, ...) instead of hard-coding it. The knowledge is
+paraphrased from r/PathOfExileBuilds and r/pathofexile threads listed in
+`references/sources.md`.
+
+Install it in Claude Code by copying the folder to `~/.claude/skills/` (or a project's
+`.claude/skills/`), or upload the packaged `pob-build-designer.skill` in the Claude app
+under Settings → Capabilities → Skills. `evals/` holds two test briefs.
 
 ## Testing
 

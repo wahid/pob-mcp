@@ -1,0 +1,186 @@
+---
+name: pob-build-designer
+description: Design original Path of Exile 1 builds from scratch, and judge or improve existing ones, using the pob-mcp Path of Building tools. Use this whenever someone asks for a new PoE build, a build "around" a skill, unique, ascendancy or mechanic, a league starter, a bosser or mapper, or asks why a build is weak, how to scale its damage, how to make it tankier, what to buy next, or whether a guide is realistic. Use it even if the user only says "make me a build" or pastes a pobb.in link and asks "is this good?".
+---
+
+# PoE build designer
+
+This skill teaches how experienced Path of Exile build makers think, and how to turn
+that thinking into a real, calculated build with the pob-mcp tools. Path of Building
+(PoB) does the arithmetic; your job is the judgment: picking a concept that has the
+power to begin with, scaling it along few strong axes, layering defenses so nothing
+one-shots the character, and keeping every number honest.
+
+Game data changes every league. Never rely on remembered stat values, node names or
+item mods. Read them live: `search_gems`, `list_ascendancy_notables`, `list_keystones`,
+`search_uniques`, `list_item_mods`, `find_passive_nodes`, `list_mastery_effects`,
+`price_check`. If you are unsure whether something still exists or still works the
+way you remember, check it with a tool before building on it.
+
+## Reference files (read when the step needs them)
+
+- `references/damage-scaling.md`: damage formula, buckets, hits vs ailments vs DoT,
+  crit, conversion, penetration, minions/totems/traps. Read before choosing how a
+  concept scales, and whenever DPS is lower than expected.
+- `references/defense.md`: defense layers, max hit, EHP, recovery, ailments, benchmarks
+  per content tier. Read before the defense pass, always.
+- `references/archetypes.md`: common build archetypes, what each one needs, and its
+  usual weak spots. Read while picking a concept.
+- `references/gear-and-progression.md`: realistic gear, budget tiers, buying order,
+  leveling. Read before creating items and before writing the progression section.
+- `references/pob-pitfalls.md`: where PoB numbers lie (config, uptime, conditional
+  supports) and how to sanity-check a build or a guide. Read before reporting numbers.
+- `references/sources.md`: the community threads this knowledge was distilled from.
+
+## The design loop
+
+Work through these steps in order. Each one has tools that make it concrete. Use
+`compare_changes` to test an idea before `apply_changes`, and `undo_last_change` freely.
+An `apply_changes` batch is all-or-nothing: if one edit fails (a misspelled gem or base),
+nothing in the batch is applied, so fix the named edit and resend the batch.
+
+### 1. Pin down the brief
+
+You need to know, or sensibly assume and state:
+- **Content goal**: league start / campaign, general mapping, juiced maps, pinnacle
+  bosses, uber bosses, or "everything".
+- **Budget**: league-start (near zero), a few divines, tens of divines, mirror tier.
+- **Playstyle**: melee / ranged / caster / minion / totem-trap-mine / DoT; fast clear vs
+  slow and tanky; any skill, unique or ascendancy they insist on.
+- **Mode**: softcore/hardcore, trade/SSF. Hardcore and SSF push you toward stronger
+  defenses and gear that can be crafted or found rather than bought.
+
+If the user gave only a skill, assume softcore trade, mapping plus pinnacle bosses,
+moderate budget, and say so at the top of your answer.
+
+### 2. Choose a concept that is strong before you add anything
+
+The most common failure in homemade builds is a concept that is weak from the start;
+everything after that is swimming upstream. Every comfort you add later (defenses,
+movement, clear) costs power, so the core must have power to spare.
+
+A strong core usually has:
+- **One main scaling vector, or several that are colinear**: one stat or mechanic that
+  feeds several damage buckets at once, ideally defense too (for example a stacked
+  attribute that grants flat damage, increased damage and a defensive pool). "100 of
+  one thing beats 10 of ten things."
+- **Big base damage** (see damage-scaling.md). Everything else multiplies it.
+- **An ascendancy that multiplies the core** rather than adding unrelated value. Read
+  the candidates with `list_ascendancy_notables` (filter by ascendancy when you can;
+  the full list is large) and compare which ones touch the build's damage type,
+  delivery and defense.
+- **A natural defense nearby** on the tree, or one that comes with the scaling vector.
+
+Avoid, unless the user wants it: splitting damage across attacks and spells, mixing
+hit and DoT scaling, stacking many unrelated uniques, mechanics that need setup the
+character cannot sustain.
+
+Use `search_gems` for the skill's tags and base stats, `search_uniques` for build-enabling
+items, `list_keystones` for keystones that change the rules. Sketch two or three
+candidate concepts in a sentence each when the brief is open, pick one and say why.
+
+### 3. Skeleton in PoB
+
+1. `new_build(ascendancy=..., level=90)`. Plan at a fixed level (90 is a good default
+   endgame target; 95+ for ubers); auto-level makes stats shift while you work.
+2. `apply_changes` with `create_socket_group` for the main skill (`set_main: true`) and
+   its likely supports. Then `rank_support_gems(replace_gem_index=...)` to test each
+   slot. Prefer supports whose bonus is unconditional over ones PoB may overrate (see
+   pob-pitfalls.md).
+3. Add auras, heralds, curses, guard skill, movement skill and a mana/flask plan as
+   socket groups. Watch reservation: `get_warnings` reports over-reservation and a
+   large share of reserved life. Supports or effects that move reservation onto life
+   shrink the pool that max hit and EHP use; only do that on purpose (low-life builds).
+4. Set **realistic configuration** before reading any DPS: `list_config_options`,
+   then `set_config`. Use config sets (`add_config_set`) for "Mapping" and "Boss".
+   Only enable conditions the build actually maintains: charges it really generates,
+   buffs it really has up, enemy conditions it really applies.
+
+### 4. Gear baseline
+
+Equip what a player at the target budget would really own (gear-and-progression.md):
+- Build-enabling uniques with `equip_unique`. Check cost with `price_check`.
+- Rares with `create_rare` using real mod ids from `list_item_mods` for that slot and
+  base, at tiers a player can buy. A rare with five top-tier mods it cannot roll
+  together is a fantasy item; do not use one to make a build look good.
+- Base names must match PoB's (some carry a suffix, such as hybrid boots); look them
+  up with `search_item_bases` before `create_rare`.
+- Flasks: a life flask plus utility flasks (movement, defense, immunity suffixes).
+  Without flasks PoB shows lower defense and damage than the real character has.
+- Resistances: cap fire/cold/lightning at 75% (PoB already applies the post-campaign
+  resistance penalty by default) mostly from gear, so the tree can go to damage and
+  defense. Some overcap protects against maps with reduced resistances or curses.
+
+### 5. Passive tree
+
+1. `allocate_node` the ascendancy notables chosen in step 2, then the keystones.
+2. `get_tree_map` once to see the tree's structure, then `find_routes` /
+   `allocate_path` toward the clusters that serve the concept. Route through nodes
+   that are useful on the way.
+3. `auto_allocate_passives(weights=...)` to fill remaining points toward a weighted
+   goal (for example main DPS plus TotalEHP plus Life), with `avoid` for anything
+   you rejected. The optimiser is greedy and follows the weights literally; when the
+   damage weight dominates it leaves defense short, so check step 6 afterwards and
+   rerun with more weight on Life/TotalEHP if needed.
+4. `list_mastery_effects` and `set_mastery` for each allocated mastery.
+5. `fix_gaps` to repair attributes and resists cheaply, then `get_warnings`.
+6. `rank_passives(mode="remove")` to find dead weight; `rank_passives(mode="add")`
+   per metric to find what to take instead. `rank_anoints` for the amulet.
+
+### 6. Defense pass (do not skip)
+
+Read defense.md, then check with `get_build_summary` and `evaluate_scenarios`:
+- Max hit taken per damage type versus the benchmark for the content goal.
+- Capped elemental resists; chaos resistance not deeply negative (unless CI or
+  similar).
+- At least one answer to many hits at once (block, suppression, evasion, high
+  recovery on hit) and one answer to big single hits (pool size, mitigation).
+- Recovery that keeps up: check life/ES regen and leech numbers against the pool.
+- Answers to freeze/stun/shock/bleed/corrupted blood appropriate to the content.
+
+Fix the biggest hole first. A build with 30% more damage and one gaping weakness
+usually performs worse than one with balanced layers.
+
+### 7. Damage pass
+
+With defenses in place, raise damage: `explain_stat` on the main damage type (for
+example `"Lightning"`) shows base damage, added damage and the total after increased,
+more and enemy resistance; `"AverageHit"` shows the crit split and `"Speed"` the rate.
+Find the bucket that is lowest relative to its potential and invest there. Re-run `rank_support_gems` and `rank_passives` after big changes;
+rankings shift as buckets fill.
+
+### 8. Progression, cost and export
+
+- `plan_leveling` for 30/50/70/90 trees when the user will level the build.
+- Item sets for budget stages (`add_item_set`): starter gear, then upgrades.
+- `trade_search` for the key rares, `price_check` for the uniques, to estimate cost.
+- `render_tree` if the user wants to see the tree.
+- `export_build` for a share code; `save_to_pob` to drop it into the PoB Builds folder.
+
+## What to report
+
+Give the user a build they can trust, not a sales pitch:
+
+```
+## <Build name>: <skill> <ascendancy>
+**Concept**: one or two sentences on why the core is strong.
+**Assumptions**: content goal, budget, level, mode (and that you assumed them, if so).
+**Numbers** (state the config: mapping vs boss, which buffs/charges are on):
+  DPS mapping / boss, life/ES, max hit by type, EHP, resists, suppression/block.
+**Defense layers**: what handles big hits, many hits, DoT and ailments.
+**Gear**: key uniques with rough prices, rare targets per slot.
+**Progression**: what to buy first and what each upgrade adds.
+**Weak spots**: honest list of what will kill it or what it struggles with.
+**PoB code**: <code>
+```
+
+Always state which config the numbers came from, flag any number that depends on a
+condition the player must maintain, and name the build's weak spots. A smaller honest
+number is more useful than a large one the player will never see in game.
+
+## Judging an existing build or guide
+
+`load_build` the link or code, then work through pob-pitfalls.md (config, gear
+realism, uptime) and the defense checklist above. Report what is inflated, what is
+missing, and the two or three changes with the biggest effect, each tested with
+`compare_changes` so you can quote the real difference.

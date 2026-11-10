@@ -329,7 +329,7 @@ def find_passive_nodes(query: str, search_stats: bool = False, include_small: bo
     with search_stats=true. Unallocated results come first, sorted by how many points
     the path from your current tree costs (pathCost)."""
     return _call("find_nodes", {"query": query, "search_stats": search_stats,
-                                "include_small": include_small, "limit": limit})
+                                "include_small": include_small, "limit": limit}, need_build=False)
 
 
 @mcp.tool()
@@ -466,7 +466,7 @@ def get_warnings() -> dict:
 @mcp.tool()
 def list_classes() -> dict:
     """All classes with their ascendancies and starting attributes."""
-    return _call("list_classes")
+    return _call("list_classes", need_build=False)
 
 
 @mcp.tool()
@@ -476,7 +476,7 @@ def search_gems(query: str = "", tags: list[str] | None = None, support: bool | 
     tags=["Bow", "Projectile"], support=true for supports only. Returns tags, main
     attribute and a description."""
     return _call("search_gems", {"query": query, "tags": tags, "support": support,
-                                 "include_vaal": include_vaal, "limit": limit})
+                                 "include_vaal": include_vaal, "limit": limit}, need_build=False)
 
 
 @mcp.tool()
@@ -487,7 +487,7 @@ def search_uniques(query: str = "", item_type: str | None = None, search_mods: b
     "Jewel", "Ring". Equip results with an equip_unique edit."""
     return _call("search_uniques", {"query": query, "item_type": item_type,
                                     "search_mods": search_mods, "include_mods": include_mods,
-                                    "limit": limit})
+                                    "limit": limit}, need_build=False)
 
 
 @mcp.tool()
@@ -495,7 +495,7 @@ def search_item_bases(query: str = "", item_type: str | None = None, limit: int 
     """Search item base types (for create_rare) by name and/or type, e.g. item_type="Bow",
     "Body Armour", "Ring", "Jewel". Highest level bases first, with implicits, defences or
     weapon stats."""
-    return _call("search_item_bases", {"query": query, "item_type": item_type, "limit": limit})
+    return _call("search_item_bases", {"query": query, "item_type": item_type, "limit": limit}, need_build=False)
 
 
 @mcp.tool()
@@ -547,7 +547,7 @@ def list_mastery_effects(node: str | None = None) -> dict:
     """Mastery effects. With `node` (e.g. "Life Mastery"), the options for that mastery;
     without, every mastery you can allocate right now (adjacent to an allocated notable).
     Each mastery costs one passive point. Apply with a set_mastery edit."""
-    return _call("list_mastery_effects", {"node": node})
+    return _call("list_mastery_effects", {"node": node}, need_build=False)
 
 
 @mcp.tool()
@@ -675,7 +675,12 @@ def explain_stat(stat: str, mod_name: str | None = None, skill: bool = True, lim
     modifier source (tree node, item, gem, base) with its value, as in PoB's Calcs tab.
     `stat` is a name from get_stats (e.g. "Life", "CritChance", "FireResist"). If the modifier
     name differs from the stat, pass mod_name (e.g. stat "TotalEHP" has no single modifier).
-    skill=false looks at character-wide modifiers instead of the main skill's."""
+    skill=false looks at character-wide modifiers instead of the main skill's.
+
+    For hit damage, pass a damage type ("Physical", "Lightning", "Cold", "Fire", "Chaos"):
+    the breakdown shows base damage, added damage, total hit, conversion and the effective
+    multiplier from enemy resistances, plus each type's share of the total. "AverageHit"
+    shows the crit/non-crit split and "Speed" the attack/cast rate."""
     return _call("explain_stat", {"stat": stat, "mod_name": mod_name, "skill": skill, "limit": limit})
 
 
@@ -885,6 +890,21 @@ def list_cluster_jewel_options(size: Literal["Large", "Medium", "Small"] = "Larg
     with a create_cluster_jewel edit."""
     return _call("cluster_jewel_options", {"size": size, "skill": skill, "item_level": item_level},
                  need_build=False)
+
+
+@mcp.tool()
+def list_ascendancy_notables(ascendancy: str | None = None) -> dict:
+    """Every ascendancy's notables with their exact stats for the current PoB version, grouped
+    by class (or one ascendancy). Bloodline ascendancies are listed too. The full list is large
+    (~9k tokens); pass `ascendancy` when you only need one."""
+    return _call("ascendancy_notables", {"ascendancy": ascendancy}, need_build=False)
+
+
+@mcp.tool()
+def list_keystones() -> dict:
+    """All keystones on the passive tree with their exact stats, plus whether each is allocated
+    and its path cost from the current tree."""
+    return _call("keystones", need_build=False)
 
 
 # ---------------------------------------------------------------------------

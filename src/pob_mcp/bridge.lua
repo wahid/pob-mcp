@@ -1046,6 +1046,11 @@ function API.warnings()
 			add("reservation", ("%s is over-reserved (%d unreserved)"):format(pool, unres))
 		end
 	end
+	local lifeRes = out.LifeReservedPercent
+	if type(lifeRes) == "number" and lifeRes >= 40 and (out.Life or 0) > 1 then
+		add("reservation", ("%d%% of life is reserved (%d unreserved). Max hit and EHP only use the unreserved part; "
+			.. "fine for a deliberate low-life build, otherwise move reservations to mana."):format(lifeRes, out.LifeUnreserved or 0))
+	end
 	for _, group in ipairs(build.skillsTab.socketGroupList) do
 		for _, g in ipairs(group.gemList or {}) do
 			if g.errMsg then
@@ -2608,6 +2613,20 @@ function API.explain_stat(p)
 	if #res.breakdown == 0 and skill and skill.breakdown then
 		res.breakdown = breakdownLines(skill.breakdown[stat])
 	end
+	-- Hit damage per type (Physical, Lightning, ...) and per-hand stats live under MainHand/OffHand
+	if #res.breakdown == 0 and player.breakdown then
+		for _, hand in ipairs({ "MainHand", "OffHand" }) do
+			local hb = player.breakdown[hand]
+			local lines = breakdownLines(hb and hb[stat])
+			if #lines > 0 then
+				if #res.breakdown > 0 then res.breakdown[#res.breakdown + 1] = "" end
+				res.breakdown[#res.breakdown + 1] = hand .. ":"
+				for _, l in ipairs(lines) do res.breakdown[#res.breakdown + 1] = l end
+				local ho = output()[hand]
+				if res.value == nil and type(ho) == "table" then res.value = num(ho[stat]) end
+			end
+		end
+	end
 	-- Modifier sources
 	local modName = p.mod_name or stat:gsub("^Total", ""):gsub("Unreserved$", "")
 	local sources = {}
@@ -3335,6 +3354,59 @@ function EDIT.create_cluster_jewel(e, notes)
 	notes[#notes + 1] = ("Socketed %s (%s, %d passives%s) in %s; %d passive point%s allocated"):format(name, sk.name,
 		passives, #picked > 0 and (": " .. table.concat(picked, ", ")) or "", "Jewel " .. socket.id, count,
 		count == 1 and "" or "s")
+end
+
+-------------------------------------------------------------------------------
+-- Game-data overviews (read live from the tree data)
+-------------------------------------------------------------------------------
+
+function API.ascendancy_notables(p)
+	local spec = B().spec
+	local want = p.ascendancy and tostring(p.ascendancy):lower()
+	local byAsc = {}
+	for _, node in pairs(spec.nodes) do
+		local asc = node.ascendancyName
+		if asc and node.type == "Notable" and (not want or asc:lower() == want) then
+			byAsc[asc] = byAsc[asc] or {}
+			table.insert(byAsc[asc], { name = node.dn, stats = node.sd })
+		end
+	end
+	-- Which class each ascendancy belongs to
+	local classOf = {}
+	for ascName, entry in pairs(spec.tree.ascendNameMap or {}) do
+		classOf[ascName] = entry.class and entry.class.name
+	end
+	for _, class in pairs(spec.tree.classes) do
+		for ascId, asc in pairs(class.classes or {}) do
+			if ascId ~= 0 and asc.name and not classOf[asc.name] then classOf[asc.name] = class.name end
+		end
+	end
+	local res = {}
+	for asc, list in pairs(byAsc) do
+		table.sort(list, function(a, b) return a.name < b.name end)
+		local cls = classOf[asc]
+		if not cls or cls == "alternate_ascendancies" then cls = "Bloodline (any class)" end
+		res[#res + 1] = { ascendancy = asc, class = cls, notables = list }
+	end
+	table.sort(res, function(a, b)
+		if (a.class or "") ~= (b.class or "") then return (a.class or "") < (b.class or "") end
+		return a.ascendancy < b.ascendancy
+	end)
+	if want and #res == 0 then error("No ascendancy named " .. tostring(p.ascendancy) .. " (see list_classes)", 0) end
+	return { treeVersion = spec.treeVersion, ascendancies = res }
+end
+
+function API.keystones()
+	local spec = B().spec
+	local res = {}
+	for _, node in pairs(spec.nodes) do
+		if node.type == "Keystone" and not node.ascendancyName and not node.isProxy and not node.expansionSkill then
+			res[#res + 1] = { name = node.dn, stats = node.sd, allocated = node.alloc or nil,
+				pathCost = (not node.alloc and node.path) and #node.path or nil }
+		end
+	end
+	table.sort(res, function(a, b) return a.name < b.name end)
+	return { treeVersion = spec.treeVersion, keystones = res }
 end
 
 -------------------------------------------------------------------------------

@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: designs-lightning-arrow-mapper
+expected_outcome: |
+  A complete Deadeye Lightning Arrow build made with the pob-mcp tools, with numbers from a stated config, checked against the skill's T16 benchmarks, honest weak spots, gear at a ~10 divine budget and a PoB code.

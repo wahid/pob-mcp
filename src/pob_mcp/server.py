@@ -93,7 +93,7 @@ EditOp = Literal[
     "add_gem", "remove_gem", "replace_gem", "set_gem",
     "set_main_skill", "set_group_enabled",
     # items
-    "equip_item", "equip_unique", "create_rare", "create_flask", "set_flask_active", "equip_timeless", "unequip_slot",
+    "equip_item", "equip_unique", "create_rare", "create_flask", "set_flask_active", "equip_timeless", "reset_tree", "unequip_slot",
     # configuration
     "set_config", "add_custom_mod",
 ]
@@ -138,6 +138,9 @@ class Edit(BaseModel):
         "empty Flask slot), quality (default 20), enabled=false to equip it switched off. Equipped "
         "flasks are switched on, which is what PoB counts. set_flask_active: slot ('Flask 1'..'Flask 5') "
         "+ enabled. "
+        "reset_tree: wipe the passive tree; keep (default ['ascendancy', 'keystones', 'jewels']) "
+        "re-allocates those picks with their paths (jewels = sockets holding jewels and the "
+        "cluster jewel notables). Mastery choices are cleared. "
         "equip_timeless: name (Lethal Pride, Brutal Restraint, Glorious Vanity, Elegant Hubris, "
         "Militant Faith) + seed (the number on the jewel) + conqueror (e.g. 'Kaom') + slot "
         "('Jewel <node id>') or node (an allocated jewel socket). "
@@ -189,6 +192,7 @@ class Edit(BaseModel):
     mod: Optional[str] = None
     seed: Optional[int] = Field(None, description="equip_timeless: the timeless jewel's seed number")
     conqueror: Optional[str] = Field(None, description="equip_timeless: conqueror name, e.g. 'Kaom', 'Xibaqua', 'Cadiga'")
+    keep: Optional[list[str]] = Field(None, description="reset_tree: what to keep: ascendancy, keystones, jewels")
 
 
 def _edits(edits: list[Edit]) -> list[dict]:
@@ -568,9 +572,9 @@ def list_mastery_effects(node: str | None = None) -> dict:
 def auto_allocate_passives(
     weights: dict[str, float] | None = None,
     points: int | None = None,
-    max_path_cost: int = 6,
+    max_path_cost: int = 8,
     include_keystones: bool = False,
-    include_small: bool = False,
+    include_small: bool | None = None,
     avoid: list[str] | None = None,
     max_seconds: int = 40,
     targets: dict[str, float] | None = None,
@@ -578,6 +582,10 @@ def auto_allocate_passives(
     jewels: list[dict[str, Any]] | None = None,
     anoint: bool = False,
     fast: bool = True,
+    target_weight: float | None = None,
+    refine: bool = True,
+    lns_rounds: int = 0,
+    lns_seconds: int = 120,
 ) -> dict:
     """Spend passive points automatically with a greedy optimiser that uses PoB's calculator.
 
@@ -593,6 +601,9 @@ def auto_allocate_passives(
     continue.
     Use undo_last_change to revert the whole run.
 
+    include_small (default: on when `targets` are given) also considers small passives,
+    which are often the cheapest way to reach life and max-hit targets; it is slower.
+
     `targets` sets minimums to reach first, e.g. {"PhysicalMaximumHitTaken": 10000,
     "LightningMaximumHitTaken": 30000}: while any is unmet, points go to the nodes that close
     the gaps fastest; after that, to the weights, never dropping a met target below its
@@ -605,6 +616,19 @@ def auto_allocate_passives(
     anoints the amulet with the best notable for the same weights (skipping anoints that
     would break mana or reservation).
 
+    By default unmet targets come strictly first. `target_weight` (e.g. 1) blends instead:
+    each node scores its weighted gain plus target_weight x its progress toward the unmet
+    targets (in % of each gap), which keeps more damage when targets are expensive.
+    After spending, a refinement pass (refine=true) swaps the least valuable added branches
+    for better nodes elsewhere while keeping every target met; `swaps` lists what it changed.
+
+    lns_rounds > 0 adds a large-neighbourhood search afterwards: each round drops a few of
+    the least valuable branches it added, refills the points with the same targets, and keeps
+    the result only if it is better and still meets every target (`lns` lists the kept
+    rounds). 10-20 rounds noticeably improve tight builds; budget lns_seconds accordingly.
+    Masteries up to 4 points away (with their path) are candidates, so gear-conditional
+    masteries are found too.
+
     fast=true (default) reuses earlier per-node estimates between full refreshes every few
     steps and scores the shortlist exactly; fast=false re-scores everything every step.
     """
@@ -614,6 +638,8 @@ def auto_allocate_passives(
         "include_keystones": include_keystones, "include_small": include_small,
         "avoid": avoid or [], "max_seconds": max_seconds, "targets": targets or {},
         "masteries": masteries, "jewels": jewels or [], "anoint": anoint, "fast": fast,
+        "target_weight": target_weight, "refine": refine,
+        "lns_rounds": lns_rounds, "lns_seconds": lns_seconds,
     })
     _history.append(snapshot)
     del _history[:-_MAX_HISTORY]

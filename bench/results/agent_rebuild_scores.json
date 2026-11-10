@@ -1,0 +1,29 @@
+{
+ "trickster": {
+  "dps": 0.433,
+  "worstHit": 0.986,
+  "points": [
+   123,
+   123
+  ],
+  "newWarnings": []
+ },
+ "saboteur": {
+  "dps": 0.912,
+  "worstHit": 0.989,
+  "points": [
+   123,
+   123
+  ],
+  "newWarnings": []
+ },
+ "hierophant": {
+  "dps": 0.941,
+  "worstHit": 0.989,
+  "points": [
+   123,
+   123
+  ],
+  "newWarnings": []
+ }
+}

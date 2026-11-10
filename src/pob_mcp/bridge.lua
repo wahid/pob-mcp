@@ -748,15 +748,43 @@ function EDIT.add_custom_mod(e, notes)
 	notes[#notes + 1] = "Added custom modifier: " .. e.mod
 end
 
+-- Skill groups granted by passives or items appear and disappear as the tree changes, which
+-- shifts the index of every group after them. Keep the main skill pointing at the same group.
+local function currentMainGroup()
+	local b = B()
+	return b.skillsTab.socketGroupList[b.mainSocketGroup]
+end
+
+function keepMainGroup(group)
+	if not group then return end
+	local b = B()
+	if b.skillsTab.socketGroupList[b.mainSocketGroup] == group then return end
+	for i, g in ipairs(b.skillsTab.socketGroupList) do
+		if g == group then
+			b.mainSocketGroup = i
+			b.buildFlag = true
+			rebuild()
+			return
+		end
+	end
+end
+
+local MAIN_CHANGING_OPS = { set_main_skill = true, create_socket_group = true, delete_socket_group = true }
+
 local function applyEdits(edits)
 	local notes = {}
 	for i, e in ipairs(edits or {}) do
 		local fn = EDIT[e.op]
 		if not fn then error(("Edit #%d: unknown op '%s'"):format(i, tostring(e.op))) end
+		local mainBefore = currentMainGroup()
 		local ok, err = pcall(fn, e, notes)
 		if not ok then
 			err = tostring(err):gsub("^[^\n:]+%.lua:%d+: ", "")
 			error(("Edit #%d (%s) failed: %s"):format(i, e.op, err), 0)
+		end
+		if not MAIN_CHANGING_OPS[e.op] then
+			rebuild()
+			keepMainGroup(mainBefore)
 		end
 	end
 	rebuild()
@@ -1687,6 +1715,57 @@ function EDIT.set_flask_active(e, notes)
 	notes[#notes + 1] = ("%s %s"):format(slotName, e.enabled ~= false and "switched on" or "switched off")
 end
 
+function EDIT.reset_tree(e, notes)
+	local build = B()
+	local spec, itemsTab = build.spec, build.itemsTab
+	local keep = {}
+	for _, k in ipairs(e.keep or { "ascendancy", "keystones", "jewels" }) do keep[k] = true end
+	-- What to put back, in an order that keeps paths valid
+	local asc, keys, sockets, cluster = {}, {}, {}, {}
+	for id, node in pairs(spec.allocNodes) do
+		if node.type ~= "ClassStart" and node.type ~= "AscendClassStart" then
+			if node.ascendancyName then
+				if keep.ascendancy then asc[#asc + 1] = id end
+			elseif id >= 65536 then
+				if keep.jewels and (node.type == "Notable" or node.type == "Keystone" or node.type == "Socket") then cluster[#cluster + 1] = id end
+			elseif node.type == "Keystone" then
+				if keep.keystones then keys[#keys + 1] = id end
+			elseif node.type == "Socket" then
+				local slot = itemsTab.slots["Jewel " .. id]
+				if keep.jewels and slot and slot.selItemId and slot.selItemId ~= 0 then sockets[#sockets + 1] = id end
+			end
+		end
+	end
+	local before = spec:CountAllocNodes()
+	spec:ResetNodes()
+	spec:BuildAllDependsAndPaths()
+	local kept, failed = 0, {}
+	local function put(list)
+		table.sort(list)
+		for _, id in ipairs(list) do
+			local node = spec.nodes[id]
+			if node and not node.alloc then
+				if node.path then spec:AllocNode(node) kept = kept + 1 else failed[#failed + 1] = node.dn or tostring(id) end
+			end
+		end
+		spec:BuildAllDependsAndPaths()
+	end
+	put(asc)
+	put(sockets)
+	itemsTab:PopulateSlots()
+	build.buildFlag = true
+	rebuild()
+	spec:BuildAllDependsAndPaths()
+	put(cluster)  -- cluster jewel subgraphs exist once their sockets are allocated
+	put(keys)
+	spec:AddUndoState()
+	rebuild()
+	local after = spec:CountAllocNodes()
+	notes[#notes + 1] = ("Reset the tree (%d points before, %d now): kept %d ascendancy, %d jewel socket, %d cluster and %d keystone picks with their paths")
+		:format(before, after, #asc, #sockets, #cluster, #keys)
+	if #failed > 0 then notes[#notes + 1] = "Could not re-allocate: " .. table.concat(failed, ", ") end
+end
+
 function EDIT.equip_timeless(e, notes)
 	local want = tostring(e.name or ""):lower()
 	local src = main.uniqueDB.byTitle[want]
@@ -1870,7 +1949,140 @@ local function weightedScore(weights, bases, out)
 	return score
 end
 
+-- Large-neighbourhood search on top of the greedy fill: drop a few low-value branches the
+-- optimiser added, refill the freed points with the same targets, keep it if it's better.
+local function lnsImprove(p, res, protected)
+	local build = B()
+	local spec = build.spec
+	local weights = res.weights
+	local targets = {}
+	for k, v in pairs(p.targets or {}) do targets[k] = tonumber(v) end
+	for k, row in pairs(res.validity or {}) do targets[k] = row.target end
+	local function feasible(out)
+		for stat, t in pairs(targets) do
+			if (readStat(out, stat) or 0) < t then return false end
+		end
+		return true
+	end
+	local base0 = output()
+	local bases = {}
+	for stat in pairs(weights) do bases[stat] = readStat(base0, stat) end
+	local function value(out)
+		return weightedScore(weights, bases, out)
+	end
+	local function allocNeighbours(node, exclude)
+		local n = {}
+		for _, other in ipairs(node.linked) do
+			if other.alloc and not (exclude and exclude[other.id]) then n[#n + 1] = other end
+		end
+		return n
+	end
+	local function branchOf(leaf)
+		local set, cost, cur = { [leaf.id] = leaf }, 1, leaf
+		while true do
+			local nb = allocNeighbours(cur, set)
+			if #nb ~= 1 then break end
+			local nxt = nb[1]
+			if protected[nxt.id] or nxt.type == "Notable" or nxt.type == "Keystone" or nxt.type == "Socket"
+				or nxt.type == "ClassStart" or nxt.ascendancyName or #allocNeighbours(nxt, set) ~= 2 then break end
+			set[nxt.id] = nxt
+			cost = cost + 1
+			cur = nxt
+		end
+		return set, cost
+	end
+	local rounds, kept = p.lns_rounds or 0, {}
+	local deadline = os.clock() + (p.lns_seconds or 120)
+	local current = feasible(output()) and value(output()) or nil
+	local seed = 0
+	for round = 1, rounds do
+		if os.clock() > deadline or not current then break end
+		local calcFunc = build.calcsTab:GetMiscCalculator()
+		local branches = {}
+		for id, node in pairs(spec.allocNodes) do
+			if not protected[id] and not node.ascendancyName and node.type ~= "ClassStart" and id < 65536
+				and #allocNeighbours(node) == 1 then
+				local set, cost = branchOf(node)
+				local rm = {}
+				for _, n in pairs(set) do rm[n] = true end
+				branches[#branches + 1] = { leaf = node, set = set, cost = cost,
+					loss = -value(calcFunc({ removeNodes = rm }, false)) }
+			end
+		end
+		if #branches == 0 then break end
+		table.sort(branches, function(a, b) return a.loss < b.loss end)
+		-- remove k of the cheapest branches, varying which ones each round
+		seed = seed + 1
+		local k = 1 + (round % math.min(5, #branches))
+		local pool = math.min(#branches, k + 4)
+		local state = spec:CreateUndoState()
+		local freed, removed = 0, {}
+		for i = 1, pool do
+			if #removed >= k then break end
+			if ((i + seed) % 3 ~= 0) or (pool - i < k - #removed) then
+				local b = branches[i]
+				if b.leaf.alloc then
+					removed[#removed + 1] = b.leaf.dn
+					spec:DeallocNode(b.leaf)
+					for _, n in pairs(b.set) do if n.alloc then spec:DeallocNode(n) end end
+					freed = freed + b.cost
+				end
+			end
+		end
+		spec:BuildAllDependsAndPaths()
+		rebuild()
+		local q = {}
+		for kk, v in pairs(p) do q[kk] = v end
+		q.points, q.lns_rounds, q.refine, q.anoint = freed, 0, true, false
+		q.max_seconds = math.min(p.max_seconds or 40, 30)
+		local ok = pcall(autoAllocate, q)
+		local out = output()
+		local v = feasible(out) and value(out) or nil
+		if ok and v and v > current + 0.05 then
+			kept[#kept + 1] = { round = round, removed = removed, gainPct = math.floor((v - current) * 100 + 0.5) / 100 }
+			current = v
+		else
+			spec:RestoreUndoState(state)
+			spec:BuildAllDependsAndPaths()
+			rebuild()
+		end
+	end
+	return kept
+end
+
 function API.auto_allocate(p)
+	local mainAtStart = B().skillsTab.socketGroupList[B().mainSocketGroup]
+	local protected = {}
+	for id in pairs(B().spec.allocNodes) do protected[id] = true end
+	local ok, res = pcall(autoAllocate, p)
+	if ok and (p.lns_rounds or 0) > 0 then
+		local ok2, kept = pcall(lnsImprove, p, res, protected)
+		if ok2 then
+			res.lns = kept
+			local after = {}
+			for stat in pairs(res.weights) do after[stat] = readStat(output(), stat) end
+			for stat, row in pairs(res.targets or {}) do
+				local v = readStat(output(), stat) or 0
+				row.value, row.met = num(v), v >= row.target
+				after[stat] = num(v)
+			end
+			for stat, row in pairs(res.validity or {}) do
+				local v = readStat(output(), stat) or 0
+				row.value, row.met = num(v), v >= row.target
+			end
+			res.stats = after
+			res.pointsSpent = B().spec:CountAllocNodes() - (res.pointsSpentBase or 0)
+		else
+			res.lnsError = tostring(kept)
+		end
+		B().spec:AddUndoState()
+	end
+	keepMainGroup(mainAtStart)
+	if not ok then error(res, 0) end
+	return res
+end
+
+function autoAllocate(p)
 	local build = B()
 	local spec = build.spec
 	local itemsTab = build.itemsTab
@@ -1881,12 +2093,33 @@ function API.auto_allocate(p)
 	local shortlist = p.shortlist or 12
 	local deadline = os.clock() + (p.max_seconds or 40)
 	local chosen, spent, stopReason = {}, 0, nil
+	local startAlloc, startCount = {}, spec:CountAllocNodes()
+	for id in pairs(spec.allocNodes) do startAlloc[id] = true end
+	local includeKeystones = p.include_keystones
+	-- small passives are often the cheapest way to reach life/defense targets
+	local includeSmall = p.include_small
+	if includeSmall == nil then includeSmall = p.targets ~= nil and next(p.targets) ~= nil end
 	local granted = {}
 	local avoid = {}
 	for _, n in ipairs(p.avoid or {}) do avoid[tostring(n):lower()] = true end
 	-- Minimum targets, e.g. { PhysicalMaximumHitTaken = 10000 }: met first, then kept
 	local targets = {}
 	for stat, v in pairs(p.targets or {}) do targets[stat] = tonumber(v) end
+	-- Keep the build usable: reservations must fit and attribute requirements must be met
+	local validity = {}
+	if p.keep_valid ~= false then
+		local out0 = output()
+		for _, attr in ipairs({ "Str", "Dex", "Int" }) do
+			local req = tonumber(out0["Req" .. attr])
+			if req and req > 0 and targets[attr] == nil then targets[attr] = req validity[attr] = true end
+		end
+		for _, pool in ipairs({ "Mana", "Life" }) do
+			local key = pool .. "Unreserved"
+			if tonumber(out0[key]) and (out0[pool .. "Reserved"] or 0) > 0 and targets[key] == nil then
+				targets[key] = 0 validity[key] = true
+			end
+		end
+	end
 	local targetsGivenUp = false
 	-- Jewels to place in sockets the optimiser opens (create_rare specs), and masteries
 	local jewelItems, nextJewel = {}, 1
@@ -1939,6 +2172,10 @@ function API.auto_allocate(p)
 				local v = math.min(readStat(out, stat) or 0, t)
 				ts = ts + (v - bv) / (t - bv) * 100
 			end
+			if p.target_weight then
+				-- blended: damage and progress toward the targets both count
+				return ws + p.target_weight * ts, ts + (ws > 0 and 1e-6 or 0)
+			end
 			return ts * 1000 + ws * 0.01, ts
 		end
 		for stat, t in pairs(targets) do
@@ -1979,7 +2216,7 @@ function API.auto_allocate(p)
 			if not node.alloc and node.path and #node.path > 0 and #node.path <= math.min(maxCost, remaining)
 				and node.dn and node.modKey ~= "" and not granted[node.id] and not node.ascendancyName
 				and (node.type == "Notable" or (p.include_keystones and node.type == "Keystone")
-					or (p.include_small and node.type == "Normal"))
+					or (includeSmall and node.type == "Normal"))
 				and not avoid[node.dn:lower()] then
 				local key = node.modKey
 				if cache[key] == nil then
@@ -1995,20 +2232,52 @@ function API.auto_allocate(p)
 		end
 		if useMasteries and remaining >= 1 then
 			for _, node in pairs(spec.nodes) do
-				if node.type == "Mastery" and not node.alloc and node.path and #node.path == 1
+				if node.type == "Mastery" and not node.alloc and node.path and #node.path >= 1
+					and #node.path <= math.min(p.mastery_reach or 4, maxCost, remaining)
 					and node.masteryEffects and #node.masteryEffects > 0 and not avoid[(node.dn or ""):lower()] then
+					-- a mastery further away is scored with the path that reaches it
+					local set = {}
+					for _, pn in ipairs(node.path) do set[pn] = true end
 					for _, opt in ipairs(masteryOptions(node)) do
 						if opt.available then
-							local mkey = "m" .. node.id .. ":" .. opt.effectId
+							local mkey = "m" .. node.id .. ":" .. opt.effectId .. ":" .. #node.path
 							local sc = stale[mkey]
 							if sc == nil then
 								sc = withMastery(node, opt.effectId, function()
-									return scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
+									return scoreOut(bases, baseUnmet, calcFunc({ addNodes = set }, useFull))
 								end)
+								sc = sc / #node.path
 								stale[mkey] = sc
 							end
 							cands[#cands + 1] = { node = node, est = sc, mastery = opt.effectId, text = opt.text }
 						end
+					end
+				end
+			end
+		end
+		-- Whole clusters: the unallocated notables of one tree group taken together, so
+		-- notables that are weak alone but strong together (crit chance + multi) get seen
+		if p.bundles ~= false then
+			local groups = {}
+			for _, node in pairs(spec.nodes) do
+				if node.type == "Notable" and not node.alloc and node.group and node.path and #node.path > 0
+					and not node.ascendancyName and not node.isProxy and not avoid[(node.dn or ""):lower()] then
+					groups[node.group] = groups[node.group] or {}
+					table.insert(groups[node.group], node)
+				end
+			end
+			for _, members in pairs(groups) do
+				if #members >= 2 then
+					local set, cost = {}, 0
+					for _, m in ipairs(members) do
+						for _, pn in ipairs(m.path) do
+							if not set[pn] then set[pn] = true cost = cost + 1 end
+						end
+					end
+					if cost <= math.min(remaining, maxCost * 2) then
+						local sc = scoreOut(bases, baseUnmet, calcFunc({ addNodes = set }, useFull))
+						cands[#cands + 1] = { node = members[1], members = members, bundleSet = set,
+							bundleCost = cost, est = sc / cost }
 					end
 				end
 			end
@@ -2035,10 +2304,16 @@ function API.auto_allocate(p)
 			local c = cands[i]
 			local node = c.node
 			local sc, ts
-			if c.mastery then
+			if c.members then
+				sc, ts = scoreOut(bases, baseUnmet, calcFunc({ addNodes = c.bundleSet }, useFull))
+				sc = sc / c.bundleCost
+			elseif c.mastery then
+				local set = {}
+				for _, pn in ipairs(node.path) do set[pn] = true end
 				sc, ts = withMastery(node, c.mastery, function()
-					return scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
+					return scoreOut(bases, baseUnmet, calcFunc({ addNodes = set }, useFull))
 				end)
+				sc = sc / #node.path
 			else
 				local set = {}
 				for _, pn in ipairs(node.path) do set[pn] = true end
@@ -2057,9 +2332,17 @@ function API.auto_allocate(p)
 		end
 		if not best or bestScore <= 0 then stopReason = "no remaining node improves the weighted stats" break end
 
-		local cost = #best.path
+		local cost = bestCand.members and bestCand.bundleCost or #best.path
 		local extra
-		if bestCand.mastery then
+		if bestCand.members then
+			local names = {}
+			for _, m in ipairs(bestCand.members) do
+				if not m.alloc and m.path then spec:AllocNode(m) end
+				names[#names + 1] = m.dn
+			end
+			spec:BuildAllDependsAndPaths()
+			extra = "cluster: " .. table.concat(names, ", ")
+		elseif bestCand.mastery then
 			EDIT.set_mastery({ node = best.id, effect = bestCand.mastery }, {})
 			extra = bestCand.text
 		else
@@ -2071,7 +2354,7 @@ function API.auto_allocate(p)
 				nextJewel = nextJewel + 1
 			end
 		end
-		spent = spent + cost
+		spent = spec:CountAllocNodes() - startCount
 		rebuild()
 		local drawback
 		if bestCand.mastery and extra then
@@ -2086,6 +2369,155 @@ function API.auto_allocate(p)
 		::continue::
 	end
 	spec:AddUndoState()
+
+	-- Refinement: swap the least valuable branch the optimiser added for a better one elsewhere,
+	-- keeping every target met. Greedy filling can't undo early choices; this can.
+	local swaps = {}
+	if p.refine ~= false and #chosen > 0 then
+		local protected = {}
+		for id in pairs(startAlloc) do protected[id] = true end
+		local function allocNeighbours(node, exclude)
+			local n = {}
+			for _, other in ipairs(node.linked) do
+				if other.alloc and not (exclude and exclude[other.id]) then n[#n + 1] = other end
+			end
+			return n
+		end
+		-- A leaf the optimiser added, plus the chain of path nodes only it needed
+		local function branchOf(leaf)
+			local set, cost = { [leaf.id] = leaf }, 1
+			local cur = leaf
+			while true do
+				local nb = allocNeighbours(cur, set)
+				if #nb ~= 1 then break end
+				local nxt = nb[1]
+				if protected[nxt.id] or nxt.type == "Notable" or nxt.type == "Keystone" or nxt.type == "Socket"
+					or nxt.type == "ClassStart" or nxt.ascendancyName then break end
+				local onward = allocNeighbours(nxt, set)
+				if #onward ~= 2 then break end  -- a junction: other branches still need it
+				set[nxt.id] = nxt
+				cost = cost + 1
+				cur = nxt
+			end
+			return set, cost
+		end
+		local floors = {}
+		local function meetsTargets(out)
+			for stat, t in pairs(floors) do
+				if (readStat(out, stat) or 0) < t then return false end
+			end
+			return true
+		end
+		local refineDeadline = os.clock() + (p.refine_seconds or math.max(10, (p.max_seconds or 40) * 0.5))
+		local tabu, tabuCount = {}, 0
+		for _ = 1, p.max_swaps or 30 do
+			if os.clock() > refineDeadline then break end
+			local calcFunc2, base2 = build.calcsTab:GetMiscCalculator()
+			calcFunc = calcFunc2
+			local bases2 = {}
+			for stat in pairs(weights) do bases2[stat] = readStat(base2, stat) end
+			-- a swap may not push any target stat below its target, or below where it is now if unmet
+			for stat, t in pairs(targets) do
+				local v = readStat(base2, stat) or 0
+				floors[stat] = math.min(t, v)
+			end
+			-- Removable branches, cheapest loss first
+			local removals = {}
+			for id, node in pairs(spec.allocNodes) do
+				if not protected[id] and not node.ascendancyName and node.type ~= "ClassStart"
+					and #allocNeighbours(node) == 1 and id < 65536 then
+					local set, cost = branchOf(node)
+					local rm = {}
+					for _, n in pairs(set) do rm[n] = true end
+					local out = calcFunc({ removeNodes = rm }, useFull)
+					local loss = -weightedScore(weights, bases2, out)
+					removals[#removals + 1] = { leaf = node, set = set, cost = cost, loss = loss, ok = meetsTargets(out) }
+				end
+			end
+			table.sort(removals, function(a, b) return a.loss < b.loss end)
+			-- Candidate additions (notables, keystones excluded unless allowed)
+			local adds = {}
+			for _, node in pairs(spec.nodes) do
+				if not node.alloc and node.path and #node.path > 0 and #node.path <= maxCost and not tabu[node.id]
+					and (node.type == "Notable" or (includeKeystones and node.type == "Keystone"))
+					and not node.ascendancyName and not node.isProxy and not avoid[(node.dn or ""):lower()] then
+					adds[#adds + 1] = node
+				end
+			end
+			-- Value of each addition on its own; keep the most valuable (not per point)
+			local scored = {}
+			for _, node in ipairs(adds) do
+				local addSet = {}
+				for _, pn in ipairs(node.path) do addSet[pn] = true end
+				local g = weightedScore(weights, bases2, calcFunc({ addNodes = addSet }, useFull))
+				if g > 0 then scored[#scored + 1] = { node = node, gain = g } end
+			end
+			table.sort(scored, function(x, y) return x.gain > y.gain end)
+			local best
+			for ai = 1, math.min(p.refine_candidates or 15, #scored) do
+				local node = scored[ai].node
+				local need = #node.path
+				local onPath = {}
+				for _, pn in ipairs(node.path) do onPath[pn.id] = true end
+				-- Free enough points from the cheapest branches that don't touch this path
+				local union, freed, leaves = {}, 0, {}
+				for _, r in ipairs(removals) do
+					if freed >= need then break end
+					local clash = false
+					for id in pairs(r.set) do if onPath[id] or union[id] then clash = true break end end
+					if not clash then
+						for id, n in pairs(r.set) do union[id] = n end
+						freed = freed + r.cost
+						leaves[#leaves + 1] = r
+					end
+				end
+				if freed >= need then
+					local addSet = {}
+					for _, pn in ipairs(node.path) do addSet[pn] = true end
+					local rm = {}
+					for _, n in pairs(union) do rm[n] = true end
+					local out = calcFunc({ removeNodes = rm, addNodes = addSet }, useFull)
+					if meetsTargets(out) then
+						local gain = weightedScore(weights, bases2, out)
+						if gain > 0.05 and (not best or gain > best.gain) then
+							best = { leaves = leaves, union = union, freed = freed, add = node, gain = gain, cost = need }
+						end
+					end
+				end
+				if os.clock() > refineDeadline then break end
+			end
+			if not best then break end
+			-- Apply: remove the branches from their leaves inwards, then take the new node.
+			-- Deallocating can take dependent nodes with it, so verify the real result and
+			-- revert unless it still meets every target, fits the budget and is better.
+			local state = spec:CreateUndoState()
+			local removedNames = {}
+			for _, r in ipairs(best.leaves) do
+				removedNames[#removedNames + 1] = r.leaf.dn
+				if r.leaf.alloc then spec:DeallocNode(r.leaf) end
+				for _, n in pairs(r.set) do if n.alloc then spec:DeallocNode(n) end end
+			end
+			spec:BuildAllDependsAndPaths()
+			if best.add.path then spec:AllocNode(best.add) end
+			rebuild()
+			local realOut = output()
+			local realGain = weightedScore(weights, bases2, realOut)
+			local within = spec:CountAllocNodes() - startCount <= budget
+			if meetsTargets(realOut) and within and realGain > 0.05 then
+				swaps[#swaps + 1] = { removed = removedNames, freed = best.freed, added = best.add.dn,
+					cost = best.cost, gainPct = math.floor(realGain * 100 + 0.5) / 100 }
+			else
+				spec:RestoreUndoState(state)
+				spec:BuildAllDependsAndPaths()
+				rebuild()
+				tabu[best.add.id] = true
+				if #swaps == 0 and next(tabu) and tabuCount >= 5 then break end
+				tabuCount = tabuCount + 1
+				if tabuCount > 8 then break end
+			end
+		end
+		spent = spec:CountAllocNodes() - startCount
+	end
 
 	local anointNote
 	if p.anoint then
@@ -2126,18 +2558,22 @@ function API.auto_allocate(p)
 	local after = {}
 	for stat in pairs(weights) do after[stat] = readStat(output(), stat) end
 	local res = { weights = weights, pointsBudget = budget, pointsSpent = spent, anoint = anointNote,
+		pointsSpentBase = startCount,
+		swaps = #swaps > 0 and swaps or nil,
 		jewelsPlaced = (#jewelItems > 0) and (nextJewel - 1) or nil,
 		allocated = chosen, stoppedBecause = stopReason or "budget used", stats = after, info = info() }
 	if next(targets) then
-		local status = {}
+		local status, valid = {}, {}
 		for stat, t in pairs(targets) do
 			local v = readStat(output(), stat) or 0
-			status[stat] = { target = t, value = num(v), met = v >= t }
-			after[stat] = num(v)
+			local row = { target = t, value = num(v), met = v >= t }
+			if validity[stat] then valid[stat] = row else status[stat] = row after[stat] = num(v) end
 		end
-		res.targets = status
+		res.targets = next(status) and status or nil
+		res.validity = next(valid) and valid or nil
 		local anyUnmet = false
 		for _, st in pairs(status) do if not st.met then anyUnmet = true end end
+		for _, st in pairs(valid) do if not st.met then anyUnmet = true end end
 		if targetsGivenUp then
 			res.targetNote = "No passive node within reach of the remaining points moves the unmet targets, so those points went to the weights. "
 				.. "Close the gap with gear, gems, flasks or config (or a larger max_path_cost)."

@@ -145,6 +145,12 @@ Equip what a player at the target budget would really own (gear-and-progression.
    `anoint: true` anoints the amulet at the end without breaking mana or reservation.
    Planned rare jewels and masteries were worth about 2x boss DPS at the same defense
    targets in testing, so use them.
+   For tight builds (several targets close together), pass `lns_rounds: 15`: it drops the
+   weakest branches and refills them, which is how the best rebuilds in testing were found.
+   If time allows, repeat it yourself: deallocate 1-5 low-value notables, rerun the
+   optimiser with the same targets on the freed points, and keep the result only if it is
+   better. Check masteries whose condition the gear meets (for example armour + ES on every
+   armour piece); they can be worth more than any notable.
 4. Jewel sockets on the tree become item slots named `Jewel <node id>` once allocated
    (`list_item_slots` lists them). An empty socket is wasted points. Timeless jewels go in
    with `equip_timeless` (jewel, seed, conqueror).

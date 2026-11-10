@@ -392,3 +392,17 @@ def test_minion_stats_readable(engine):
     assert sc["mapping"]["stats"]["Minion.CombinedDPS"] > 0
     res = engine.call("compare_edits", {"edits": [{"op": "remove_gem", "group": 1, "gem": "Minion Damage"}]})
     assert "Minion.CombinedDPS" in res["changes"]
+
+
+def test_reset_tree_keeps_ascendancy(deadeye):
+    asc_before = deadeye.call("summary")["ascendancyPointsUsed"]
+    res = edit(deadeye, {"op": "reset_tree"})
+    assert "Reset the tree" in res["notes"][0]
+    s = deadeye.call("summary")
+    assert s["ascendancyPointsUsed"] == asc_before
+    assert s["passivePointsUsed"] <= 10
+
+
+def test_auto_allocate_keeps_build_valid(deadeye):
+    res = deadeye.call("auto_allocate", {"points": 30, "weights": {"CombinedDPS": 1}, "max_seconds": 60})
+    assert all(v["met"] for v in (res.get("validity") or {}).values())

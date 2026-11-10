@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pob-mcp"
+name = "pathofbuilding-mcp"
 version = "0.4.0"
 description = "MCP server that runs Path of Building Community's Lua calc engine headlessly"
 readme = "README.md"
@@ -17,7 +17,7 @@ requires-python = ">=3.10"
 dependencies = ["mcp>=1.2", "lupa>=2.0", "pillow>=9.2"]
 
 [project.scripts]
-pob-mcp = "pob_mcp.server:main"
+pathofbuilding-mcp = "pob_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pob_mcp"]
@@ -33,3 +33,6 @@ test = ["pytest>=7"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["online: needs internet access (poe.ninja, pathofexile.com)"]
+
+[project.urls]
+Homepage = "https://github.com/wahid/pob-mcp"

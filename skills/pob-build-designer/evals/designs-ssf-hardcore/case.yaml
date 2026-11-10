@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: designs-ssf-hardcore
+expected_outcome: |
+  A tanky SSF hardcore build whose gear is self-found or craftable, with layered defenses, ailment answers and max hits above T16 benchmarks, and a PoB code.

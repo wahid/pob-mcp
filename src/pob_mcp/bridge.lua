@@ -188,13 +188,20 @@ local SUMMARY_KEYS = {
 	"Str", "Dex", "Int", "ReqStr", "ReqDex", "ReqInt",
 	"MovementSpeedMod", "EffectiveMovementSpeedMod", "PowerChargesMax", "FrenzyChargesMax",
 	"EnduranceChargesMax", "ManaCost", "LifeCost",
+	-- minion builds (absent otherwise)
+	"Minion.CombinedDPS", "Minion.TotalDPS", "Minion.TotalDotDPS", "Minion.Life", "Minion.EnergyShield",
+	"Minion.FireResist", "Minion.ColdResist", "Minion.LightningResist", "Minion.ChaosResist",
 }
 
 local function pickStats(keys)
 	local out = output()
 	local res = {}
 	for _, k in ipairs(keys) do
-		local v = out[k]
+		local v = out
+		for part in tostring(k):gmatch("[^%.]+") do  -- "Minion.CombinedDPS" reads out.Minion.CombinedDPS
+			if type(v) ~= "table" then v = nil break end
+			v = v[part]
+		end
 		if type(v) == "number" or type(v) == "string" or type(v) == "boolean" then
 			res[k] = num(v)
 		end
@@ -210,6 +217,16 @@ local function allStats(filter)
 		if type(k) == "string" and (type(v) == "number" or type(v) == "boolean" or type(v) == "string") then
 			if not pat or k:lower():find(pat, 1, true) then
 				res[k] = num(v)
+			end
+		end
+	end
+	-- Minion stats as "Minion.<name>"
+	if type(out.Minion) == "table" then
+		for k, v in pairs(out.Minion) do
+			local key = "Minion." .. tostring(k)
+			if type(k) == "string" and (type(v) == "number" or type(v) == "boolean")
+				and (not pat or key:lower():find(pat, 1, true)) then
+				res[key] = num(v)
 			end
 		end
 	end
@@ -1642,7 +1659,7 @@ function EDIT.create_flask(e, notes)
 	local nP, nS = 0, 0
 	for _, a in ipairs(e.affixes or {}) do
 		local id, roll = tostring(a), 1
-		if type(a) == "table" then id, roll = tostring(a.id), tonumber(a.roll) or 1 end
+		if type(a) == "table" then id, roll = tostring(a.id), tonumber(a.roll) or 0.5 end
 		local m = pool[id]
 		if not m then badAffixError(id, baseName, pool) end
 		if not m.allowed then error(("%s needs item level %d"):format(id, m.mod.level)) end
@@ -1668,6 +1685,51 @@ function EDIT.set_flask_active(e, notes)
 	if not slotName or not tostring(slotName):match("^Flask %d$") then error("set_flask_active needs slot 'Flask 1'..'Flask 5'") end
 	setFlaskActive(slotName, e.enabled ~= false)
 	notes[#notes + 1] = ("%s %s"):format(slotName, e.enabled ~= false and "switched on" or "switched off")
+end
+
+function EDIT.equip_timeless(e, notes)
+	local want = tostring(e.name or ""):lower()
+	local src = main.uniqueDB.byTitle[want]
+	if not src or src.baseName ~= "Timeless Jewel" then
+		error("Not a timeless jewel: " .. tostring(e.name) .. " (Lethal Pride, Brutal Restraint, Glorious Vanity, Elegant Hubris, Militant Faith)")
+	end
+	local raw = src:BuildRaw()
+	local seed = tonumber(e.seed)
+	if not seed then error("equip_timeless needs a numeric seed") end
+	local conq = tostring(e.conqueror or ""):lower()
+	local out, found, conquerors = {}, false, {}
+	for line in raw:gmatch("[^\n]+") do
+		local variantLine = line:match("^{variant:[%d,]+}(.*)$")
+		local text = variantLine or line
+		if text:find("%(%d+%-%d+%)") and (text:find("under ") or text:find("name of ") or text:find("commemorate ")
+				or text:find("by ") or text:find("Templar ") or text:find("akhara of ")) then
+			local who = text:match("under (.+)$") or text:match("name of (.+)$") or text:match("commemorate (.+)$")
+				or text:match("akhara of (.+)$") or text:match("by High Templar (.+)$") or text:match("by (.+)$")
+			if who then conquerors[#conquerors + 1] = who end
+			if not found and who and (conq == "" or who:lower():find(conq, 1, true)) then
+				local lo, hi = text:match("%((%d+)%-(%d+)%)")
+				lo, hi = tonumber(lo), tonumber(hi)
+				if seed < lo or seed > hi then error(("Seed %d is outside %d-%d for %s"):format(seed, lo, hi, src.title)) end
+				out[#out + 1] = (text:gsub("%(%d+%-%d+%)", tostring(seed), 1))
+				found = true
+			end
+		elseif not line:match("^Variant:") and not line:match("^Selected Variant:") and not variantLine then
+			out[#out + 1] = line
+		end
+	end
+	if not found then
+		error(("No conqueror matching '%s' for %s. Options: %s"):format(tostring(e.conqueror), src.title, table.concat(conquerors, ", ")))
+	end
+	local item = new("Item"):Item(table.concat(out, "\n"))
+	item:BuildModList()
+	local slotName = e.slot
+	if not slotName and e.node then
+		local node = resolveNode(e.node)
+		if not node then error("Passive node not found: " .. tostring(e.node)) end
+		slotName = "Jewel " .. node.id
+	end
+	if not slotName then error("equip_timeless needs a slot ('Jewel <node id>') or node (an allocated jewel socket)") end
+	equipParsed(item, slotName, notes, (" (seed %d)"):format(seed))
 end
 
 function EDIT.equip_unique(e, notes)
@@ -1697,7 +1759,7 @@ function EDIT.equip_unique(e, notes)
 	equipParsed(item, e.slot, notes, note)
 end
 
-function EDIT.create_rare(e, notes)
+local function makeRare(e, notes)
 	local data = B().data
 	local baseName, base = findBase(e.base)
 	if not baseName then error("Unknown item base: " .. tostring(e.base) .. " (see search_item_bases)") end
@@ -1714,7 +1776,7 @@ function EDIT.create_rare(e, notes)
 		lines[#lines + 1] = "Crafted: true"
 		for _, a in ipairs(e.affixes) do
 			local id = type(a) == "table" and (a.id or a.mod_id) or a
-			local roll = type(a) == "table" and a.roll or 1
+			local roll = type(a) == "table" and a.roll or 0.5
 			local m = pool[id]
 			if not m then badAffixError(id, baseName, pool) end
 			if not m.allowed then error(("Mod %s needs item level %d"):format(id, m.mod.level)) end
@@ -1771,12 +1833,22 @@ function EDIT.create_rare(e, notes)
 
 	item:NormaliseQuality()
 	item:BuildModList()
-	equipParsed(item, e.slot, notes)
 	if #unsupported > 0 then
 		notes[#notes + 1] = "Warning: PoB does not understand these mod lines: " .. table.concat(unsupported, " | ")
 	end
 	if #warnings > 0 then
 		notes[#notes + 1] = "Warning: this item may not be craftable: " .. table.concat(warnings, "; ")
+	end
+	return item
+end
+
+function EDIT.create_rare(e, notes)
+	local item = makeRare(e, notes)
+	local n = #notes
+	equipParsed(item, e.slot, notes)
+	-- keep the "Equipped ..." note first, as before
+	if n > 0 and #notes == n + 1 then
+		table.insert(notes, 1, table.remove(notes))
 	end
 end
 
@@ -1801,6 +1873,7 @@ end
 function API.auto_allocate(p)
 	local build = B()
 	local spec = build.spec
+	local itemsTab = build.itemsTab
 	local weights = p.weights
 	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
 	local budget = p.points or (pointBudget() - spec:CountAllocNodes())
@@ -1815,6 +1888,24 @@ function API.auto_allocate(p)
 	local targets = {}
 	for stat, v in pairs(p.targets or {}) do targets[stat] = tonumber(v) end
 	local targetsGivenUp = false
+	-- Jewels to place in sockets the optimiser opens (create_rare specs), and masteries
+	local jewelItems, nextJewel = {}, 1
+	for _, js in ipairs(p.jewels or {}) do
+		local tmp = {}
+		jewelItems[#jewelItems + 1] = makeRare(js, tmp)
+	end
+	local useMasteries = p.masteries ~= false
+	local function withMastery(node, effectId, fn)
+		local saved, savedAll = node.sd, node.allMasteryOptions
+		node.sd = spec.tree.masteryEffects[effectId].sd
+		node.allMasteryOptions = false
+		spec.tree:ProcessStats(node)
+		local ok, a, b = pcall(fn)
+		node.sd, node.allMasteryOptions = saved, savedAll
+		spec.tree:ProcessStats(node)
+		if not ok then error(a, 0) end
+		return a, b
+	end
 
 	-- Validate stats up front
 	do
@@ -1856,6 +1947,10 @@ function API.auto_allocate(p)
 		return ws
 	end
 
+	local fast = p.fast ~= false
+	local refreshEvery = p.refresh_every or 4
+	local step, stale, targetsChanged = 0, {}, false
+	local lastUnmetCount
 	while spent < budget do
 		if os.clock() > deadline then
 			stopReason = "time limit reached; progress is kept, call auto_allocate again to continue"
@@ -1867,10 +1962,18 @@ function API.auto_allocate(p)
 		for stat in pairs(weights) do bases[stat] = readStat(base, stat) end
 		for stat in pairs(targets) do bases[stat] = readStat(base, stat) end
 		local baseUnmet = unmetTargets(base)
+		local unmetCount = 0
+		for _ in pairs(baseUnmet) do unmetCount = unmetCount + 1 end
+		targetsChanged = lastUnmetCount ~= nil and unmetCount ~= lastUnmetCount
+		lastUnmetCount = unmetCount
 		local remaining = budget - spent
 		local useFull = weights.FullDPS ~= nil
 
-		-- Pass 1: node on its own (cached by identical mods), normalised by path cost
+		-- Pass 1: node on its own (cached by identical mods), normalised by path cost.
+		-- Between full refreshes, estimates from earlier steps are reused (pass 2 is exact).
+		step = step + 1
+		local refresh = (not fast) or step % refreshEvery == 1 or targetsChanged
+		if refresh then stale = {} end
 		local cands, cache = {}, {}
 		for _, node in pairs(spec.nodes) do
 			if not node.alloc and node.path and #node.path > 0 and #node.path <= math.min(maxCost, remaining)
@@ -1880,45 +1983,150 @@ function API.auto_allocate(p)
 				and not avoid[node.dn:lower()] then
 				local key = node.modKey
 				if cache[key] == nil then
-					cache[key] = scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
+					if stale[key] ~= nil then
+						cache[key] = stale[key]
+					else
+						cache[key] = scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
+						stale[key] = cache[key]
+					end
 				end
 				cands[#cands + 1] = { node = node, est = cache[key] / #node.path }
+			end
+		end
+		if useMasteries and remaining >= 1 then
+			for _, node in pairs(spec.nodes) do
+				if node.type == "Mastery" and not node.alloc and node.path and #node.path == 1
+					and node.masteryEffects and #node.masteryEffects > 0 and not avoid[(node.dn or ""):lower()] then
+					for _, opt in ipairs(masteryOptions(node)) do
+						if opt.available then
+							local mkey = "m" .. node.id .. ":" .. opt.effectId
+							local sc = stale[mkey]
+							if sc == nil then
+								sc = withMastery(node, opt.effectId, function()
+									return scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
+								end)
+								stale[mkey] = sc
+							end
+							cands[#cands + 1] = { node = node, est = sc, mastery = opt.effectId, text = opt.text }
+						end
+					end
+				end
+			end
+		end
+		local jewel = jewelItems[nextJewel]
+		if jewel then
+			for _, node in pairs(spec.nodes) do
+				if node.type == "Socket" and not node.alloc and not node.ascendancyName and not node.isProxy and node.path and #node.path > 0
+					and #node.path <= math.min(maxCost, remaining) and itemsTab.slots["Jewel " .. node.id] then
+					local set = {}
+					for _, pn in ipairs(node.path) do set[pn] = true end
+					local sc = scoreOut(bases, baseUnmet, calcFunc({ addNodes = set,
+						repSlotName = "Jewel " .. node.id, repItem = jewel }, useFull))
+					cands[#cands + 1] = { node = node, est = sc / #node.path, jewel = true, exact = sc / #node.path }
+				end
 			end
 		end
 		if #cands == 0 then stopReason = "no reachable candidates within budget" break end
 		table.sort(cands, function(a, b) return a.est > b.est end)
 
 		-- Pass 2: exact value of the whole path for the shortlist
-		local best, bestScore, bestTarget
+		local best, bestScore, bestTarget, bestCand
 		for i = 1, math.min(shortlist, #cands) do
-			local node = cands[i].node
-			local set = {}
-			for _, pn in ipairs(node.path) do set[pn] = true end
-			local sc, ts = scoreOut(bases, baseUnmet, calcFunc({ addNodes = set }, useFull))
-			sc = sc / #node.path
-			if not bestScore or sc > bestScore then best, bestScore, bestTarget = node, sc, ts end
+			local c = cands[i]
+			local node = c.node
+			local sc, ts
+			if c.mastery then
+				sc, ts = withMastery(node, c.mastery, function()
+					return scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
+				end)
+			else
+				local set = {}
+				for _, pn in ipairs(node.path) do set[pn] = true end
+				local override = { addNodes = set }
+				if c.jewel then override.repSlotName, override.repItem = "Jewel " .. node.id, jewel end
+				sc, ts = scoreOut(bases, baseUnmet, calcFunc(override, useFull))
+				sc = sc / #node.path
+			end
+			if not bestScore or sc > bestScore then best, bestScore, bestTarget, bestCand = node, sc, ts, c end
 		end
 		if not targetsGivenUp and next(baseUnmet) and (not best or (bestTarget or 0) <= 0) then
 			-- Nothing on the tree moves the unmet targets: carry on with the weights only
 			targetsGivenUp = true
+			stale = {}
 			goto continue
 		end
 		if not best or bestScore <= 0 then stopReason = "no remaining node improves the weighted stats" break end
 
 		local cost = #best.path
-		spec:AllocNode(best)
+		local extra
+		if bestCand.mastery then
+			EDIT.set_mastery({ node = best.id, effect = bestCand.mastery }, {})
+			extra = bestCand.text
+		else
+			spec:AllocNode(best)
+			if bestCand.jewel then
+				rebuild()
+				equipParsed(jewel, "Jewel " .. best.id, {})
+				extra = "socketed " .. (jewel.name or "jewel")
+				nextJewel = nextJewel + 1
+			end
+		end
 		spent = spent + cost
 		rebuild()
-		chosen[#chosen + 1] = { name = best.dn, type = best.type, cost = cost,
+		local drawback
+		if bestCand.mastery and extra then
+			local t = extra:lower()
+			if t:find("lose ") or t:find("less ") or t:find("reduced ") or t:find("cannot ") or t:find("take ") then
+				drawback = "Check this mastery: it has a drawback PoB may not model (costs, losses on use)"
+			end
+		end
+		chosen[#chosen + 1] = { name = best.dn, type = best.type, cost = cost, effect = extra, check = drawback,
 			forTargets = (not targetsGivenUp and next(baseUnmet) ~= nil) or nil,
 			scorePerPoint = math.floor(bestScore * 100 + 0.5) / 100 }
 		::continue::
 	end
 	spec:AddUndoState()
 
+	local anointNote
+	if p.anoint then
+		-- Problems an anoint must not introduce: running out of mana/life for reservations or costs
+		local function resourceProblems()
+			local n = 0
+			local ok, w = pcall(API.warnings, {})
+			for _, x in ipairs(ok and w.warnings or {}) do
+				local m = x.message or ""
+				if x.kind == "reservation" or m:find("enough Mana", 1, true) or m:find("enough Life", 1, true) then n = n + 1 end
+			end
+			return n
+		end
+		local before = resourceProblems()
+		local amulet = itemsTab.slots.Amulet
+		local amuletItem = amulet and amulet.selItemId ~= 0 and itemsTab.items[amulet.selItemId]
+		local originalRaw = amuletItem and amuletItem:BuildRaw()
+		local ok, r = pcall(API.rank_anoints, { weights = weights, limit = 8 })
+		anointNote = ok and "No anoint improves the weighted stats without breaking mana/reservation"
+			or ("Anoint ranking failed: " .. tostring(r))
+		for _, cand in ipairs(ok and r.results or {}) do
+			if (cand.score or 0) <= 0 then break end
+			local ok2 = pcall(EDIT.anoint, { node = cand.name }, {})
+			rebuild()
+			if ok2 and resourceProblems() <= before then
+				anointNote = "Anointed " .. cand.name
+				break
+			end
+			if originalRaw then  -- put the amulet back as it was and try the next one
+				local orig = new("Item"):Item(originalRaw)
+				orig:BuildModList()
+				equipParsed(orig, "Amulet", {})
+				rebuild()
+			end
+		end
+	end
+
 	local after = {}
 	for stat in pairs(weights) do after[stat] = readStat(output(), stat) end
-	local res = { weights = weights, pointsBudget = budget, pointsSpent = spent,
+	local res = { weights = weights, pointsBudget = budget, pointsSpent = spent, anoint = anointNote,
+		jewelsPlaced = (#jewelItems > 0) and (nextJewel - 1) or nil,
 		allocated = chosen, stoppedBecause = stopReason or "budget used", stats = after, info = info() }
 	if next(targets) then
 		local status = {}
@@ -3290,6 +3498,10 @@ function API.rank_anoints(p)
 	local slotName = p.slot or "Amulet"
 	local slot = itemsTab.slots[slotName]
 	local item = slot and slot.selItemId ~= 0 and itemsTab.items[slot.selItemId] or nil
+	if item and (not (item.base.type == "Amulet" or item.canBeAnointed) or item.base.subType == "Talisman") then
+		error(("%s (%s) can't be anointed%s"):format(slotName, item.name or "item",
+			item.base.subType == "Talisman" and ": talismans take no anoints" or ""), 0)
+	end
 	local weights = p.weights
 	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
 	local calcFunc = build.calcsTab:GetMiscCalculator()
@@ -3520,6 +3732,204 @@ function EDIT.create_cluster_jewel(e, notes)
 	notes[#notes + 1] = ("Socketed %s (%s, %d passives%s) in %s; %d passive point%s allocated"):format(name, sk.name,
 		passives, #picked > 0 and (": " .. table.concat(picked, ", ")) or "", "Jewel " .. socket.id, count,
 		count == 1 and "" or "s")
+end
+
+-------------------------------------------------------------------------------
+-- Gear upgrades: the single mod changes per slot that gain the most
+-------------------------------------------------------------------------------
+
+local GEAR_SLOTS = { "Weapon 1", "Weapon 2", "Helmet", "Body Armour", "Gloves", "Boots",
+	"Amulet", "Ring 1", "Ring 2", "Belt" }
+
+-- A copy of `item` with explicit line `removeIdx` taken out (if any) and `addLine` added (if any)
+local function itemVariant(item, removeIdx, addLine)
+	local copy = new("Item"):Item(item:BuildRaw())
+	copy.crafted = false  -- keep edited explicit lines instead of re-crafting from affix ids
+	if removeIdx then table.remove(copy.explicitModLines, removeIdx) end
+	if addLine then table.insert(copy.explicitModLines, { line = addLine, mods = {} }) end
+	copy:BuildAndParseRaw()
+	copy:BuildModList()
+	return copy
+end
+
+function API.gear_upgrades(p)
+	local build = B()
+	local itemsTab = build.itemsTab
+	local weights = p.weights
+	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
+	local maxTier = p.max_tier or 2
+	local roll = p.roll or 0.5
+	local perSlot = p.per_slot or 3
+	local calcFunc, base = build.calcsTab:GetMiscCalculator()
+	local useFull = weights.FullDPS ~= nil
+	local bases = {}
+	for stat in pairs(weights) do
+		bases[stat] = readStat(base, stat)
+		if bases[stat] == nil then error(("Unknown or non-numeric stat '%s'"):format(stat), 0) end
+	end
+	local keyStats = { defaultMetric(), "TotalEHP", "Life", "PhysicalMaximumHitTaken", "LightningMaximumHitTaken",
+		"FireResist", "ColdResist", "LightningResist", "ChaosResist" }
+	local function changesOf(out)
+		local ch = {}
+		for _, k in ipairs(keyStats) do
+			local b, a = readStat(base, k), readStat(out, k)
+			if b and a and math.abs(a - b) > 1e-6 then
+				ch[k] = { before = num(b), after = num(a), pct = b ~= 0 and math.floor((a - b) / math.abs(b) * 10000 + 0.5) / 100 or nil }
+			end
+		end
+		return ch
+	end
+	local wanted = {}
+	for _, sl in ipairs(p.slots or {}) do wanted[sl] = true end
+	local results, skipped = {}, {}
+	for _, slotName in ipairs(GEAR_SLOTS) do
+		local slot = itemsTab.slots[slotName]
+		local item = slot and slot.selItemId and slot.selItemId ~= 0 and itemsTab.items[slot.selItemId]
+		if (not p.slots or wanted[slotName]) and item then
+			if item.rarity ~= "RARE" then
+				skipped[#skipped + 1] = { slot = slotName, item = item.name, reason = item.rarity:lower() .. " item" }
+			elseif item.corrupted or item.mirrored then
+				skipped[#skipped + 1] = { slot = slotName, item = item.name,
+					reason = (item.corrupted and "corrupted" or "mirrored") .. " (can't be modified; replace it instead)" }
+			else
+				-- What each current explicit line is worth, and which affix type it is
+				local lines = {}
+				for i, ml in ipairs(item.explicitModLines) do
+					if not ml.crafted and not ml.fractured then lines[#lines + 1] = { idx = i, line = ml.line } end
+				end
+				local probe = blankRare(item.baseName, 86)
+				local matched = matchModLines(probe, (function() local t = {} for _, l in ipairs(lines) do t[#t + 1] = l.line end return t end)(), 86)
+				local typeOf, groupsPresent = {}, {}
+				for _, m in ipairs(matched) do
+					for _, ln in ipairs(m.lines) do typeOf[ln] = m.type end
+					groupsPresent[m.group] = true
+				end
+				local count = { Prefix = 0, Suffix = 0 }
+				for _, l in ipairs(lines) do
+					l.type = typeOf[l.line]
+					if l.type then count[l.type] = count[l.type] + 1 end
+					local out = calcFunc({ repSlotName = slotName, repItem = itemVariant(item, l.idx, nil) }, useFull)
+					l.value = -weightedScore(weights, bases, out)  -- score lost by removing it
+				end
+				local limit = (probe.affixLimit or 6) / 2
+				local weakest = {}
+				for _, l in ipairs(lines) do
+					if l.type and (not weakest[l.type] or l.value < weakest[l.type].value) then weakest[l.type] = l end
+				end
+				-- Candidate mods: top tiers of each group not on the item yet
+				local _, byGroup = modPool(probe, 86)
+				local cands = {}
+				for g, list in pairs(byGroup) do
+					local grp = list[1].mod.group
+					if not groupsPresent[grp] then
+						for _, m in ipairs(list) do
+							if m.allowed and m.tier <= maxTier and #m.mod == 1 then
+								local text = itemLib.applyRange(m.mod[1], roll)
+								local removeLine
+								if count[m.mod.type] >= limit then removeLine = weakest[m.mod.type] end
+								if count[m.mod.type] < limit or removeLine then
+									local ok, out = pcall(calcFunc, { repSlotName = slotName,
+										repItem = itemVariant(item, removeLine and removeLine.idx, text) }, useFull)
+									if ok then
+										local sc = weightedScore(weights, bases, out)
+										if sc > 0 then
+											local uncaps = {}
+											for _, el in ipairs({ "Fire", "Cold", "Lightning" }) do
+												local cap = resistCap(el)
+												local b, a = readStat(base, el .. "Resist") or 0, readStat(out, el .. "Resist") or 0
+												if b >= cap and a < cap then uncaps[#uncaps + 1] = ("%s resistance drops to %d%%"):format(el, a) end
+											end
+											cands[#cands + 1] = { slot = slotName, item = item.name, add = text, addId = m.id, tier = m.tier,
+												type = m.mod.type, replaces = removeLine and removeLine.line or nil,
+												score = math.floor(sc * 100 + 0.5) / 100, changes = changesOf(out),
+												warning = #uncaps > 0 and (table.concat(uncaps, "; ") .. " (re-cap it elsewhere)") or nil }
+										end
+									end
+								end
+							end
+						end
+					end
+				end
+				table.sort(cands, function(a, b) return a.score > b.score end)
+				for i = 1, math.min(perSlot, #cands) do results[#results + 1] = cands[i] end
+			end
+		end
+	end
+	table.sort(results, function(a, b) return a.score > b.score end)
+	return { weights = weights, roll = roll, maxTier = maxTier, upgrades = results, skipped = skipped,
+		note = "Each upgrade swaps one mod: the new mod goes in a free affix slot, or replaces the weakest mod of the same type (prefix/suffix). Score is the weighted % gain. Search the trade site for the item with the new mod (trade_search) to price it." }
+end
+
+-------------------------------------------------------------------------------
+-- Config audit: what each switched-on Configuration condition is worth
+-------------------------------------------------------------------------------
+
+-- Settings that describe the scenario rather than a condition the build must maintain
+local CONFIG_SETUP_VARS = {
+	bandit = true, enemyIsBoss = true, resistancePenalty = true, pantheonMajorGod = true,
+	pantheonMinorGod = true, enemySizePreset = true, presetBossSkills = true, repeatMode = true,
+	resourceGainMode = true, doomBlastSource = true, plagueBearerState = true, customMods = true,
+	ChanceToIgnoreEnemyPhysicalDamageReductionMode = true, GamblesprintMovementSpeed = true,
+	DisableEHPGainOnBlock = true, meleeDistance = true, projectileDistance = true,
+}
+
+function API.config_audit(p)
+	local build = B()
+	local configTab = build.configTab
+	local labels, defaults = {}, {}
+	for _, varData in ipairs(LoadModule("Modules/ConfigOptions")) do
+		if varData.var then
+			labels[varData.var] = cleanText(varData.label or varData.var)
+			defaults[varData.var] = varData.defaultState or varData.defaultIndex and nil
+		end
+	end
+	local stats = (p.stats and #p.stats > 0) and p.stats
+		or { defaultMetric(), "TotalEHP", "PhysicalMaximumHitTaken", "LightningMaximumHitTaken" }
+	local function read()
+		local out, r = output(), {}
+		for _, k in ipairs(stats) do r[k] = readStat(out, k) end
+		return r
+	end
+	rebuild()
+	local base = read()
+	local vars = {}
+	for var, v in pairs(configTab.input) do
+		if not CONFIG_SETUP_VARS[var] and not var:match("^enemy") and labels[var] ~= nil
+			and (v == true or (type(v) == "number" and v ~= 0)) then
+			vars[#vars + 1] = var
+		end
+	end
+	table.sort(vars)
+	local rows, quiet = {}, {}
+	for _, var in ipairs(vars) do
+		local old = configTab.input[var]
+		configTab.input[var] = (old == true) and false or nil
+		configTab:BuildModList()
+		rebuild()
+		local now = read()
+		configTab.input[var] = old
+		local changes, biggest = {}, 0
+		for _, k in ipairs(stats) do
+			local b, a = base[k], now[k]
+			if b and a and a ~= b then
+				local pct = b ~= 0 and (a - b) / math.abs(b) * 100 or 0
+				changes[k] = { before = num(b), after = num(a), pct = math.floor(pct * 100 + 0.5) / 100 }
+				biggest = math.max(biggest, math.abs(pct))
+			end
+		end
+		if next(changes) then
+			rows[#rows + 1] = { var = var, label = labels[var], value = old, changes = changes, impact = biggest }
+		else
+			quiet[#quiet + 1] = var
+		end
+	end
+	configTab:BuildModList()
+	rebuild()
+	table.sort(rows, function(a, b) return a.impact > b.impact end)
+	for _, r in ipairs(rows) do r.impact = nil end
+	return { stats = stats, base = base, conditions = rows, noEffect = quiet,
+		note = "Each row switches one condition off (or back to its default) and shows the change. "
+			.. "Keep a condition only if the build really maintains it in play." }
 end
 
 -------------------------------------------------------------------------------

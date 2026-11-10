@@ -145,7 +145,7 @@ def test_list_item_mods(engine):
 
 def test_create_rare_affixes(deadeye):
     raw = deadeye.call("items")["items"][0]["raw"]
-    assert "Prefix: {range:1}LocalAddedLightningDamageTwoHand10" in raw
+    assert "Prefix: {range:0.5}LocalAddedLightningDamageTwoHand10" in raw
     with pytest.raises(PobError, match="can't roll"):
         edit(deadeye, {"op": "create_rare", "slot": "Ring 1", "base": "Two-Stone Ring",
                        "affixes": ["LocalAddedLightningDamageTwoHand10"]})
@@ -350,3 +350,45 @@ def test_auto_allocate_targets(deadeye):
                                          "targets": {"Life": life + 150}, "max_seconds": 60})
     assert res["targets"]["Life"]["met"]
     assert res["allocated"][0].get("forTargets")
+
+
+def test_timeless_jewel(deadeye):
+    edit(deadeye, {"op": "allocate_node", "node": 34483})
+    res = edit(deadeye, {"op": "equip_timeless", "name": "Lethal Pride", "seed": 11403, "conqueror": "Kaom",
+                         "slot": "Jewel 34483"})
+    assert "seed 11403" in res["notes"][-1] or any("seed 11403" in n for n in res["notes"])
+    with pytest.raises(PobError, match="outside"):
+        edit(deadeye, {"op": "equip_timeless", "name": "Brutal Restraint", "seed": 99, "conqueror": "Balbala",
+                       "slot": "Jewel 34483"})
+
+
+def test_auto_allocate_masteries_and_jewels(deadeye):
+    jewel = {"base": "Viridian Jewel", "affixes": ["PercentIncreasedLifeJewel", "LightningDamageJewel"]}
+    res = deadeye.call("auto_allocate", {"points": 30, "weights": {"CombinedDPS": 1, "Life": 1},
+                                         "jewels": [jewel], "max_seconds": 90, "max_path_cost": 9})
+    types = {a["type"] for a in res["allocated"]}
+    assert "Mastery" in types
+    assert res.get("jewelsPlaced") in (0, 1)
+
+
+def test_gear_upgrades_and_config_audit(deadeye):
+    res = deadeye.call("gear_upgrades", {"per_slot": 2})
+    assert res["upgrades"] and res["upgrades"][0]["slot"] == "Weapon 1"
+    deadeye.call("apply_edits", {"edits": [{"op": "set_config", "var": "useFrenzyCharges", "value": True}]})
+    audit = deadeye.call("config_audit", {})
+    assert any(c["var"] == "useFrenzyCharges" for c in audit["conditions"])
+
+
+def test_minion_stats_readable(engine):
+    engine.call("new_build")
+    engine.loaded = True
+    engine.call("apply_edits", {"edits": [
+        {"op": "set_ascendancy", "ascendancy": "Necromancer"}, {"op": "set_level", "level": 80},
+        {"op": "create_socket_group", "set_main": True, "gems": ["Summon Raging Spirit", "Minion Damage"]}]})
+    st = engine.call("stats", {"keys": ["Minion.CombinedDPS", "Minion.Life"]})
+    assert st.get("Minion.CombinedDPS", 0) > 0 and st.get("Minion.Life", 0) > 0
+    assert any(k.startswith("Minion.") for k in engine.call("stats", {"filter": "minion.life"}))
+    sc = engine.call("scenarios", {"stats": ["Minion.CombinedDPS"]})["scenarios"]
+    assert sc["mapping"]["stats"]["Minion.CombinedDPS"] > 0
+    res = engine.call("compare_edits", {"edits": [{"op": "remove_gem", "group": 1, "gem": "Minion Damage"}]})
+    assert "Minion.CombinedDPS" in res["changes"]

@@ -40,6 +40,9 @@ for the same build and config.
 | `trade_search` | A pathofexile.com trade search for upgrades in a slot: every mod that can roll there is weighted by its PoB-calculated value |
 | `price_check` | poe.ninja prices for uniques, or for everything unique the build wears |
 | `popular_builds` | What ladder players run (poe.ninja): share of characters using each ascendancy, main skill, keystone, unique, anoint, mastery and gem, filtered by ascendancy and/or skill |
+| `load_ladder_build` | Load a real poe.ninja ladder character (random, top, by rank, or by account/character; filter by ascendancy/skill) |
+| `audit_config` | Switch off each enabled Configuration condition in turn and show what it was worth for DPS, EHP and max hits |
+| `rank_gear_upgrades` | The best single mod change per rare slot (new mod in a free affix or replacing the weakest), with resist-cap warnings |
 | `rank_anoints` | Every anointable notable ranked by its value on this build, with the oils needed |
 | `list_ascendancy_notables` | Every ascendancy's notables (or one) with exact stats, read live from PoB |
 | `list_keystones` | All keystones with their stats, allocation and path cost |
@@ -62,7 +65,7 @@ for the same build and config.
 | `find_routes` | 2–3 distinct cheapest routes to a node, with `via` / `avoid`, what each route picks up, and PoB-calculated stat changes |
 | `list_mastery_effects` | Mastery options, for one mastery or every one you can allocate now |
 | `list_item_slots` | Gear slots plus allocated tree jewel sockets |
-| `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards |
+| `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards; also picks mastery effects, sockets planned `jewels`, and can `anoint` |
 | `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree, most valuable nodes first |
 | `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
 | `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |
@@ -93,7 +96,7 @@ Used by `compare_changes` and `apply_changes`. Several edits can go in one call.
 | Item sets | `add_item_set`, `switch_item_set`, `rename_item_set`, `delete_item_set` |
 | Config sets | `add_config_set` (with values), `switch_config_set`, `rename_config_set`, `delete_config_set` |
 | Skills | `create_socket_group`, `delete_socket_group`, `add_gem`, `remove_gem`, `replace_gem`, `set_gem`, `set_main_skill`, `set_group_enabled` |
-| Items | `equip_unique`, `create_rare` (exact `affixes` by mod id, always valid; or free-text `mods`, checked against the base's mod pool), `create_flask` (magic flask from mod ids, switched on), `set_flask_active`, `equip_item` (pasted item text), `unequip_slot` |
+| Items | `equip_unique`, `create_rare` (exact `affixes` by mod id, always valid; or free-text `mods`, checked against the base's mod pool), `create_flask` (magic flask from mod ids, switched on), `set_flask_active`, `equip_timeless` (timeless jewel by seed and conqueror), `equip_item` (pasted item text), `unequip_slot` |
 | Config | `set_config`, `add_custom_mod` |
 
 Gem names work with or without the "Support" suffix.
@@ -229,7 +232,7 @@ seconds; if it reaches its time limit, the progress is kept and calling it again
 
 ### Online features
 
-`trade_search`, `price_check`, `popular_builds` and `import_character` use the internet; everything else runs
+`trade_search`, `price_check`, `popular_builds`, `load_ladder_build` and `import_character` use the internet; everything else runs
 offline.
 
 - **Prices** come from [poe.ninja](https://poe.ninja/docs/api). Responses are cached for 15

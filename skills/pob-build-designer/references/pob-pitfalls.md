@@ -42,8 +42,18 @@ Support gems with conditions PoB cannot see:
   deal two or three elements, so a pure-lightning build gets almost nothing from it (and
   setting its resonance to maximum in config inflates the number). Check what a support
   needs, and look at its real contribution in `rank_support_gems`' `currentSupports`.
+- Supports and buffs that need you to spend mana or life, cast or attack (Arcane Surge,
+  Lifetap-style, Inspiration) look strong on skills that spend nothing, such as
+  Righteous Fire or most auras. PoB may still count them; in game they do nothing.
 - Prefer supports with unconditional more multipliers unless the condition really holds.
 `rank_support_gems` reports what PoB calculates; apply this judgment on top.
+
+## Optimiser picks with drawbacks
+
+`auto_allocate_passives` scores what PoB calculates. Mastery effects and notables whose
+cost PoB doesn't model (for example losing life or energy shield per skill use) can win
+on paper; the result marks suspect masteries with `check`. Read every mastery it chose
+and `avoid` the ones whose drawback matters for how the build is played.
 
 ## Interactions that may combine badly
 

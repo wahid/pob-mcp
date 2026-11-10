@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: designs-dot-league-starter
+expected_outcome: |
+  A cheap damage-over-time league starter with a leveling plan, numbers from a stated config, defenses checked against benchmarks and a PoB code.

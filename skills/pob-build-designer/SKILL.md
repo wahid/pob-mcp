@@ -1,6 +1,6 @@
 ---
 name: pob-build-designer
-description: Design original Path of Exile 1 builds from scratch, and judge or improve existing ones, using the pob-mcp Path of Building tools. Use this whenever someone asks for a new PoE build, a build "around" a skill, unique, ascendancy or mechanic, a league starter, a bosser or mapper, or asks why a build is weak, how to scale its damage, how to make it tankier, what to buy next, or whether a guide is realistic. Use it even if the user only says "make me a build" or pastes a pobb.in link and asks "is this good?".
+description: 'Path of Exile 1 build workshop on live Path of Building math (pob-mcp tools). Use this skill before answering any message where a PoE player wants a character made, chosen or fixed: recommending league starters or comparing build options; designing a build around a skill, unique, ascendancy or playstyle such as totems or minions; working within SSF, hardcore or divine budgets; or diagnosing a real character (low DPS, deaths, weak defenses, what to upgrade next, reviewing a pobb.in link or guide). It reads game data live and calculates real DPS, EHP and max hit, which beats answers from memory that go stale every league. Load it even for short, slangy messages such as "my RF jugg keeps dying" or "comfy totem starter, 2 div". Not for build-free trivia (mechanic definitions, quests, atlas strategy), creative writing, or programming on PoB files or the pob-mcp codebase.'
 ---
 
 # PoE build designer
@@ -95,7 +95,8 @@ candidate concepts in a sentence each when the brief is open, pick one and say w
    socket groups. Watch reservation: `get_warnings` reports over-reservation and a
    large share of reserved life. Supports or effects that move reservation onto life
    shrink the pool that max hit and EHP use; only do that on purpose (low-life builds).
-4. Set **realistic configuration** before reading any DPS: `list_config_options`,
+4. Set **realistic configuration** before reading any DPS (`audit_config` afterwards shows
+   what each enabled condition is worth): `list_config_options`,
    then `set_config`. Use config sets (`add_config_set`) for "Mapping" and "Boss", and
    set `enemyIsBoss` explicitly in each ("None" for mapping, "Pinnacle" or "Uber" for
    bosses): PoB's own default may already be a boss.
@@ -138,10 +139,16 @@ Equip what a player at the target budget would really own (gear-and-progression.
    and compare: that trade-off curve tells you, and the user, whether the gear and budget
    can support both goals. If even zero targets leave DPS short of the benchmark, the gear
    or the concept is the bottleneck, not the tree; say so and name the upgrades that move it.
+   The optimiser also picks mastery effects (1 point each) as it goes. Pass the jewels
+   you plan to use as `jewels` (create_rare specs, e.g. a Viridian Jewel with life and
+   the build's damage/crit mods) and it values jewel sockets with them and sockets them;
+   `anoint: true` anoints the amulet at the end without breaking mana or reservation.
+   Planned rare jewels and masteries were worth about 2x boss DPS at the same defense
+   targets in testing, so use them.
 4. Jewel sockets on the tree become item slots named `Jewel <node id>` once allocated
-   (`list_item_slots` lists them). An empty socket is wasted points; rare jewels with life
-   and the build's damage or crit mods are cheap and standard on most builds.
-5. `list_mastery_effects` and `set_mastery` for each allocated mastery.
+   (`list_item_slots` lists them). An empty socket is wasted points. Timeless jewels go in
+   with `equip_timeless` (jewel, seed, conqueror).
+5. Check any masteries you allocated yourself (`list_mastery_effects`, `set_mastery`).
 6. `fix_gaps` to repair attributes and resists cheaply, then `get_warnings`.
 7. `rank_passives(mode="remove")` to find dead weight; `rank_passives(mode="add")`
    per metric to find what to take instead. `rank_anoints` for the amulet.
@@ -172,7 +179,9 @@ rankings shift as buckets fill.
 
 - `plan_leveling` for 30/50/70/90 trees when the user will level the build.
 - Item sets for budget stages (`add_item_set`): starter gear, then upgrades.
-- `trade_search` for the key rares, `price_check` for the uniques, to estimate cost.
+- `rank_gear_upgrades` for the next purchases: the single mod change per rare slot that
+  gains the most (with what it replaces and any resist it would uncap). Then
+  `trade_search` for those items and `price_check` for the uniques, to estimate cost.
 - `render_tree` if the user wants to see the tree.
 - `export_build` for a share code; `save_to_pob` to drop it into the PoB Builds folder.
 
@@ -199,7 +208,10 @@ number is more useful than a large one the player will never see in game.
 
 ## Judging an existing build or guide
 
-`load_build` the link or code, then work through pob-pitfalls.md (config, gear
-realism, uptime) and the defense checklist above. Report what is inflated, what is
-missing, and the two or three changes with the biggest effect, each tested with
-`compare_changes` so you can quote the real difference.
+`load_build` the link or code (or `load_ladder_build` for a real ladder character from
+poe.ninja), then work through pob-pitfalls.md (config, gear realism, uptime) and the
+defense checklist above. `audit_config` switches off each enabled condition and shows
+what it was worth, which is the fastest way to find inflated numbers; then judge which
+of those the build really maintains. `rank_gear_upgrades` finds the best gear fixes.
+Report what is inflated, what is missing, and the two or three changes with the biggest
+effect, each tested with `compare_changes` so you can quote the real difference.

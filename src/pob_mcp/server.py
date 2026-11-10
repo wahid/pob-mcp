@@ -93,7 +93,7 @@ EditOp = Literal[
     "add_gem", "remove_gem", "replace_gem", "set_gem",
     "set_main_skill", "set_group_enabled",
     # items
-    "equip_item", "equip_unique", "create_rare", "create_flask", "set_flask_active", "unequip_slot",
+    "equip_item", "equip_unique", "create_rare", "create_flask", "set_flask_active", "equip_timeless", "unequip_slot",
     # configuration
     "set_config", "add_custom_mod",
 ]
@@ -138,6 +138,9 @@ class Edit(BaseModel):
         "empty Flask slot), quality (default 20), enabled=false to equip it switched off. Equipped "
         "flasks are switched on, which is what PoB counts. set_flask_active: slot ('Flask 1'..'Flask 5') "
         "+ enabled. "
+        "equip_timeless: name (Lethal Pride, Brutal Restraint, Glorious Vanity, Elegant Hubris, "
+        "Militant Faith) + seed (the number on the jewel) + conqueror (e.g. 'Kaom') + slot "
+        "('Jewel <node id>') or node (an allocated jewel socket). "
         "equip_item: slot + item_text (pasted item). unequip_slot: slot. "
         "CONFIG  set_config: var + value (see list_config_options). add_custom_mod: mod."
     ))
@@ -152,7 +155,7 @@ class Edit(BaseModel):
     variant: Optional[str] = Field(None, description="Unique variant name fragment or number")
     base: Optional[str] = Field(None, description="Item base type, e.g. 'Thicket Bow' (see search_item_bases)")
     mods: Optional[list[str]] = Field(None, description="Explicit mod lines, written as in-game, e.g. '+90 to maximum Life'")
-    affixes: Optional[list[str | dict[str, Any]]] = Field(None, description="Exact mod ids from list_item_mods, or {\"id\": ..., \"roll\": 0-1}")
+    affixes: Optional[list[str | dict[str, Any]]] = Field(None, description="Exact mod ids from list_item_mods, or {\"id\": ..., \"roll\": 0-1} (default roll 0.5, the middle of the range)")
     crafted: Optional[list[str]] = Field(None, description="One bench-crafted mod line")
     strict: Optional[bool] = Field(None, description="create_rare: reject mods that can't roll on the base")
     spec: Optional[str | int] = Field(None, description="Tree spec index or title")
@@ -184,6 +187,8 @@ class Edit(BaseModel):
     var: Optional[str] = Field(None, description="Config variable name")
     value: Any = Field(None, description="Config value: true/false, number, or choice value string")
     mod: Optional[str] = None
+    seed: Optional[int] = Field(None, description="equip_timeless: the timeless jewel's seed number")
+    conqueror: Optional[str] = Field(None, description="equip_timeless: conqueror name, e.g. 'Kaom', 'Xibaqua', 'Cadiga'")
 
 
 def _edits(edits: list[Edit]) -> list[dict]:
@@ -227,7 +232,8 @@ def new_build(ascendancy: str | None = None, class_name: str | None = None,
 
     Without `level`, PoB's auto-level mode is on: the level is estimated from the points
     allocated, so stats change with level as you add passives. Pass a level (e.g. 90) to
-    plan a build at a fixed level.
+    plan a build at a fixed level. Note that PoB's default configuration treats the enemy as a
+    Pinnacle boss; set enemyIsBoss (or use config sets) for mapping numbers.
 
     Typical flow for creating a build: new_build -> create_socket_group (main skill, set_main)
     -> equip_unique / create_rare for gear -> allocate ascendancy notables -> allocate key
@@ -568,6 +574,10 @@ def auto_allocate_passives(
     avoid: list[str] | None = None,
     max_seconds: int = 40,
     targets: dict[str, float] | None = None,
+    masteries: bool = True,
+    jewels: list[dict[str, Any]] | None = None,
+    anoint: bool = False,
+    fast: bool = True,
 ) -> dict:
     """Spend passive points automatically with a greedy optimiser that uses PoB's calculator.
 
@@ -577,8 +587,10 @@ def auto_allocate_passives(
     defaults to all remaining points at the current level.
 
     Allocate build-defining picks (keystones, specific notables, ascendancy) yourself first;
-    keystones are excluded here unless include_keystones=true. Masteries are not chosen
-    automatically. If it hits the time limit the progress is kept; call it again to continue.
+    keystones are excluded here unless include_keystones=true. Mastery effects next to
+    allocated notables are candidates too (1 point each, at most one effect per mastery type;
+    masteries=false to skip). If it hits the time limit the progress is kept; call it again to
+    continue.
     Use undo_last_change to revert the whole run.
 
     `targets` sets minimums to reach first, e.g. {"PhysicalMaximumHitTaken": 10000,
@@ -586,12 +598,22 @@ def auto_allocate_passives(
     the gaps fastest; after that, to the weights, never dropping a met target below its
     minimum. The result reports each target's status. If the tree cannot close a gap, the
     remaining points go to the weights and `targetNote` says so.
+
+    `jewels` lists jewels to socket, as create_rare specs ({"base": "Viridian Jewel",
+    "affixes": [...]}): unallocated jewel sockets then become candidates, valued with the next
+    jewel in the list, which is socketed when its socket is chosen. `anoint=true` finally
+    anoints the amulet with the best notable for the same weights (skipping anoints that
+    would break mana or reservation).
+
+    fast=true (default) reuses earlier per-node estimates between full refreshes every few
+    steps and scores the shortlist exactly; fast=false re-scores everything every step.
     """
     snapshot = _call("export_xml")["xml"]
     res = _call("auto_allocate", {
         "weights": weights, "points": points, "max_path_cost": max_path_cost,
         "include_keystones": include_keystones, "include_small": include_small,
         "avoid": avoid or [], "max_seconds": max_seconds, "targets": targets or {},
+        "masteries": masteries, "jewels": jewels or [], "anoint": anoint, "fast": fast,
     })
     _history.append(snapshot)
     del _history[:-_MAX_HISTORY]
@@ -674,6 +696,55 @@ def popular_builds(ascendancy: str | None = None, skill: str | None = None, leag
     toward strong, popular and expensive builds. poe.ninja's API is undocumented, so this can
     break if the site changes."""
     return online.build_stats(league=league, ascendancy=ascendancy, skill=skill, top=max(1, min(top, 50)))
+
+
+@mcp.tool()
+def load_ladder_build(ascendancy: str | None = None, skill: str | None = None,
+                      account: str | None = None, character: str | None = None,
+                      pick: str = "random", league: str | None = None) -> dict:
+    """Load a real ladder character from poe.ninja into Path of Building (current league by
+    default). Give `account` and `character` for a specific one, or filter the ladder by
+    `ascendancy` and/or main `skill` and choose with `pick`: "random" (default), "top", or a
+    rank number ("7"). "random" skips characters that look ungeared (poe.ninja EHP under 10k
+    or DPS under 100k), which are common on the experience ladder; pick="any" doesn't.
+    Returns the build summary, the ladder row (poe.ninja's DPS/EHP figures) and the other
+    candidates. Uses poe.ninja's undocumented API."""
+    import random as _random
+    candidates = None
+    if not (account and character):
+        lad = online.ladder_characters(league=league, ascendancy=ascendancy, skill=skill)
+        candidates = lad["characters"]
+        if not candidates:
+            raise PobError("No ladder characters match these filters")
+        if pick == "top":
+            row = candidates[0]
+        elif str(pick).isdigit():
+            idx = int(pick) - 1
+            if not 0 <= idx < len(candidates):
+                raise PobError(f"Rank {pick} is out of range (1-{len(candidates)})")
+            row = candidates[idx]
+        else:
+            pool = candidates
+            if pick != "any":
+                geared = [c for c in candidates
+                          if c.get("ehpValue", 0) >= 10_000 and c.get("dpsValue", 0) >= 100_000]
+                pool = geared or candidates
+            row = _random.choice(pool)
+        account, character = row["account"], row["character"]
+    else:
+        row = {"account": account, "character": character}
+    data = online.ladder_character(account, character, league=league)
+    res = _engine().load_build(data["pathOfBuildingExport"], f"{character} (poe.ninja)")
+    _history.clear()
+    _source.clear()
+    out = {"loaded": res, "ladder": {**row, "league": data.get("league"), "level": data.get("level"),
+                                     "class": data.get("class"),
+                                     "mainSkills": [s.get("name") or (s.get("allGems") or [{}])[0].get("name")
+                                                    for s in (data.get("skills") or [])][:6],
+                                     "updated": data.get("updatedUtc")}}
+    if candidates:
+        out["otherCandidates"] = [c for c in candidates if c is not row][:10]
+    return out
 
 
 @mcp.tool()
@@ -920,6 +991,30 @@ def list_cluster_jewel_options(size: Literal["Large", "Medium", "Small"] = "Larg
     with a create_cluster_jewel edit."""
     return _call("cluster_jewel_options", {"size": size, "skill": skill, "item_level": item_level},
                  need_build=False)
+
+
+@mcp.tool()
+def rank_gear_upgrades(weights: dict[str, float] | None = None, slots: list[str] | None = None,
+                       max_tier: int = 2, roll: float = 0.5, per_slot: int = 3) -> dict:
+    """Which single mod change on each rare item gains the most, using PoB's calculator.
+
+    For every equipped rare (or the given `slots`), each mod that can roll on the base and
+    isn't on the item yet (tiers 1..`max_tier`, at `roll` 0-1 of its range) is tried: in a
+    free prefix/suffix, or replacing the item's weakest mod of that type. Returns the best
+    `per_slot` per slot, sorted by weighted gain (default weights: main DPS 1 + TotalEHP 0.5),
+    with what it replaces and the effect on DPS, EHP, life, max hits and resists. Uniques
+    are listed as skipped. Use trade_search on the upgraded item to see what it costs."""
+    return _call("gear_upgrades", {"weights": weights, "slots": slots, "max_tier": max_tier,
+                                   "roll": roll, "per_slot": per_slot})
+
+
+@mcp.tool()
+def audit_config(stats: list[str] | None = None) -> dict:
+    """Check the Configuration tab for inflated numbers: switches off each condition that is
+    turned on (enemy shocked, on full life, charges, buffs, ...) one at a time and reports
+    what it was worth for the main DPS, EHP and max hits (or `stats`). Conditions with no
+    effect are listed separately. Use it before trusting or reporting a build's numbers."""
+    return _call("config_audit", {"stats": stats or []})
 
 
 @mcp.tool()

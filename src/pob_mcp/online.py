@@ -17,7 +17,7 @@ import urllib.request
 
 from .engine import PobError
 
-USER_AGENT = "pob-mcp/0.3 (Path of Building MCP server; personal use)"
+USER_AGENT = "pob-mcp/0.4 (Path of Building MCP server; personal use)"
 NINJA = "https://poe.ninja/poe1/api/economy"
 POE = "https://www.pathofexile.com"
 UNIQUE_TYPES = ["UniqueWeapon", "UniqueArmour", "UniqueAccessory", "UniqueFlask", "UniqueJewel"]
@@ -371,3 +371,78 @@ def build_stats(league: str | None = None, ascendancy: str | None = None, skill:
                                        for n, c in generic[:top]]
         out[key] = [{"name": n, "count": c, "pct": round(100 * c / total, 1)} for n, c in rows[:top]]
     return out
+
+
+def _row_columns(raw_result_fields) -> dict[str, list[str]]:
+    """Text columns of the ladder rows (field 12): name, account, dps.total, ehp__str, ..."""
+    cols = {}
+    for f, wt, v in raw_result_fields:
+        if f != 12 or wt != 2:
+            continue
+        sub = _pb_fields(v)
+        names = [x[2].decode() for x in sub if x[0] == 1 and x[1] == 2]
+        values = [x[2].decode("utf-8", "replace") for x in sub if x[0] == 7 and x[1] == 2]
+        if names and values:
+            cols[names[0]] = values
+    return cols
+
+
+def _short_number(text: str) -> float | None:
+    """'2.8M' -> 2800000, '108k' -> 108000, '0.53' -> 0.53."""
+    t = text.strip().replace(",", "")
+    mult = 1.0
+    if t[-1:].lower() in ("k", "m", "b"):
+        mult = {"k": 1e3, "m": 1e6, "b": 1e9}[t[-1].lower()]
+        t = t[:-1]
+    try:
+        return float(t) * mult
+    except ValueError:
+        return None
+
+
+def ladder_characters(league: str | None = None, ascendancy: str | None = None,
+                      skill: str | None = None, kind: str = "exp") -> dict:
+    """The ladder rows poe.ninja shows for these filters (top characters by experience)."""
+    snap = _snapshot(league, kind)
+    params = {"overview": snap["snapshotName"], "type": kind}
+    total, dicts, dims = _search(snap, params)
+    if ascendancy or skill:
+        dim_dict = {d: dn for d, dn, _ in dims}
+        if ascendancy:
+            params["class"] = _canonical(ascendancy, _dictionary(dicts[dim_dict["class"]]), "class or ascendancy")
+        if skill:
+            params["skills"] = _canonical(skill, _dictionary(dicts[dim_dict["skills"]]), "main skill")
+    url = f"{NINJA_BUILDS}/{snap['version']}/search?" + urllib.parse.urlencode(params)
+    with _lock:
+        hit = _cache.get(url)
+    raw = hit[1] if hit and time.time() - hit[0] < CACHE_SECONDS else _get_bytes(url)
+    with _lock:
+        _cache[url] = (time.time(), raw)
+    fields = _pb_fields(_pb_fields(raw)[0][2])
+    cols = _row_columns(fields)
+    names, accounts = cols.get("name", []), cols.get("account", [])
+    rows = []
+    for i, (n, a) in enumerate(zip(names, accounts)):
+        row = {"rank": i + 1, "character": n, "account": a}
+        for key, label in (("dps.total", "dps"), ("ehp__str", "ehp")):
+            vals = cols.get(key)
+            if vals and i < len(vals) and vals[i]:
+                row[label] = vals[i]
+                num = _short_number(vals[i])
+                if num is not None:
+                    row[label + "Value"] = num
+        rows.append(row)
+    return {"league": snap["name"], "snapshot": snap, "filters": {k: v for k, v in params.items()
+                                                                 if k not in ("overview", "type")},
+            "characters": rows}
+
+
+def ladder_character(account: str, character: str, league: str | None = None, kind: str = "exp") -> dict:
+    """One ladder character from poe.ninja, including its Path of Building export code."""
+    snap = _snapshot(league, kind)
+    params = {"account": account, "name": character, "overview": snap["snapshotName"], "type": kind}
+    url = f"{NINJA_BUILDS}/{snap['version']}/character?" + urllib.parse.urlencode(params)
+    data = _get_json(url)
+    if not isinstance(data, dict) or not data.get("pathOfBuildingExport"):
+        raise PobError(f"poe.ninja has no Path of Building export for {character} ({account}) in {snap['name']}")
+    return data

@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: plans-uber-upgrade
+expected_outcome: |
+  The existing Flicker Strike Slayer is loaded and judged: the uncapped cold resistance is found, config-dependent numbers are checked, uber-boss numbers are shown, and a prioritised, quantified upgrade plan fits the 30 divine budget.
+context:
+  scaffold_script: place-files.sh

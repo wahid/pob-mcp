@@ -66,3 +66,13 @@ def test_popular_builds_online():
     assert all(not u["name"].startswith(("Rare ", "Magic ")) for u in res["uniques"])
     with pytest.raises(Exception, match="Did you mean"):
         online.build_stats(skill="Lightning Arow")
+
+
+@pytest.mark.online
+def test_ladder_character_online():
+    from pob_mcp import online
+    lad = online.ladder_characters(skill="Lightning Arrow")
+    assert lad["characters"] and {"character", "account", "rank"} <= set(lad["characters"][0])
+    first = lad["characters"][0]
+    data = online.ladder_character(first["account"], first["character"])
+    assert data["pathOfBuildingExport"]

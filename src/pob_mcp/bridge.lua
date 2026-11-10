@@ -154,7 +154,14 @@ end
 local function rebuild()
 	local build = B()
 	build.buildFlag = true
-	frame()
+	-- In auto-level mode PoB re-estimates the level after calculating, which needs
+	-- another pass for stats to match the new level
+	for _ = 1, 3 do
+		local level = build.characterLevel
+		frame()
+		if build.characterLevel == level then break end
+		build.buildFlag = true
+	end
 end
 
 local function output()
@@ -1016,7 +1023,10 @@ function API.warnings()
 
 	-- Extra checks
 	for _, elem in ipairs({ "Fire", "Cold", "Lightning" }) do
-		local r, max = out[elem .. "Resist"], out[elem .. "ResistMax"] or 75
+		local env = build.calcsTab.mainEnv
+		local max = env and env.player.modDB:Sum("BASE", nil, elem .. "ResistMax") or 75
+		if max == 0 then max = 75 end
+		local r = out[elem .. "Resist"]
 		if type(r) == "number" and r < max then
 			add("resist", ("%s resistance is %d%% (cap %d%%)"):format(elem, r, max))
 		end
@@ -1054,6 +1064,179 @@ function API.warnings()
 	if skill and skill.disableReason then add("skill", "Main skill disabled: " .. skill.disableReason) end
 
 	return { count = #res, warnings = res }
+end
+
+-------------------------------------------------------------------------------
+-- Item mod pools (used by create_rare, list_item_mods, fix_gaps, trade weights)
+-------------------------------------------------------------------------------
+
+local function findBase(name)
+	local data = B().data
+	if data.itemBases[name] then return name, data.itemBases[name] end
+	local want = tostring(name):lower()
+	for n, b in pairs(data.itemBases) do
+		if n:lower() == want then return n, b end
+	end
+end
+
+-- A blank rare of the given base, used to ask PoB which mods can roll on it
+local function blankRare(baseName, ilvl)
+	local item = new("Item"):Item(("Rarity: RARE\nBlank\n%s\nCrafted: true\nItem Level: %d"):format(baseName, ilvl or 86))
+	if item.base then item:Craft() end -- sets the affix limits
+	return item
+end
+
+-- Natural explicit mods for an item (no unique-only, corrupted, influence or
+-- veiled mods unless the item has that influence)
+local function modPool(item, ilvl)
+	local data = B().data
+	local natural = item.affixes == data.itemMods.Item and data.itemMods.Explicit or item.affixes
+	local list = {}
+	for modId, mod in pairs(natural or {}) do
+		if (mod.type == "Prefix" or mod.type == "Suffix") and mod.weightKey
+			and item:GetModSpawnWeight(mod) > 0 then
+			list[#list + 1] = { id = modId, mod = mod, allowed = (mod.level or 1) <= (ilvl or 86) }
+		end
+	end
+	-- Tier 1 = highest level in its group for this base
+	local byGroup = {}
+	for _, m in ipairs(list) do
+		local g = (m.mod.group or m.id) .. "|" .. m.mod.type
+		byGroup[g] = byGroup[g] or {}
+		table.insert(byGroup[g], m)
+	end
+	for _, g in pairs(byGroup) do
+		table.sort(g, function(a, b) return (a.mod.level or 0) > (b.mod.level or 0) end)
+		for i, m in ipairs(g) do m.tier = i end
+	end
+	return list, byGroup
+end
+
+local function modText(mod)
+	local t = {}
+	for _, line in ipairs(mod) do t[#t + 1] = line end
+	return table.concat(t, " / ")
+end
+
+function API.list_item_mods(p)
+	local baseName = findBase(p.base)
+	if not baseName then error("Unknown item base: " .. tostring(p.base) .. " (see search_item_bases)", 0) end
+	local ilvl = p.item_level or 86
+	local item = blankRare(baseName, ilvl)
+	local _, byGroup = modPool(item, ilvl)
+	local q = p.query and p.query:lower()
+	local groups = {}
+	for _, list in pairs(byGroup) do
+		local top = list[1]
+		local include = not p.mod_type or top.mod.type:lower() == p.mod_type:lower()
+		if include and q then
+			include = false
+			for _, m in ipairs(list) do
+				if modText(m.mod):lower():find(q, 1, true) or (m.mod.group or ""):lower():find(q, 1, true) then include = true break end
+			end
+		end
+		if include then
+			local tiers = {}
+			for _, m in ipairs(list) do
+				if m.allowed and #tiers < (p.tiers or 3) then
+					tiers[#tiers + 1] = { id = m.id, tier = m.tier, level = m.mod.level, text = modText(m.mod) }
+				end
+			end
+			if #tiers > 0 then
+				groups[#groups + 1] = { group = top.mod.group, type = top.mod.type, tags = top.mod.modTags, tiers = tiers }
+			end
+		end
+	end
+	table.sort(groups, function(a, b)
+		if a.type ~= b.type then return a.type < b.type end
+		return (a.group or "") < (b.group or "")
+	end)
+	local crafted
+	if p.include_crafted then
+		crafted = {}
+		for _, m in ipairs(B().data.masterMods or {}) do
+			if m.types and m.types[item.type] and (not q or modText(m):lower():find(q, 1, true)) then
+				crafted[#crafted + 1] = { type = m.type, text = modText(m), level = m.level }
+			end
+		end
+	end
+	return {
+		base = baseName, itemLevel = ilvl,
+		limits = { prefixes = item.affixLimit / 2, suffixes = item.affixLimit / 2 },
+		note = "Use the tier ids in create_rare's `affixes`. Tier 1 is the best; tiers above the item level are left out.",
+		groups = groups, crafted = crafted,
+	}
+end
+
+-- "+(115-129) to maximum Life" -> Lua pattern capturing numbers, plus the ranges
+local function templatePattern(tmpl)
+	local ranges = {}
+	local s = tmpl:gsub("%((%-?[%d%.]+)%-(%-?[%d%.]+)%)", function(a, b)
+		ranges[#ranges + 1] = { tonumber(a), tonumber(b) }
+		return "\1"
+	end)
+	s = s:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0")
+	s = s:gsub("\1", "(%%-?[%%d%%.]+)")
+	return "^" .. s .. "$", ranges
+end
+
+local function lineMatches(tmpl, line)
+	local pat, ranges = templatePattern(tmpl)
+	local caps = { line:match(pat) }
+	if #caps == 0 then
+		-- templates without ranges match literally
+		return #ranges == 0 and tmpl:lower() == line:lower()
+	end
+	for i, r in ipairs(ranges) do
+		local v = tonumber(caps[i])
+		local lo, hi = math.min(r[1], r[2]), math.max(r[1], r[2])
+		if not v or v < lo - 0.001 or v > hi + 0.001 then return false end
+	end
+	return true
+end
+
+-- Matches free-text mod lines to the item's mod pool.
+-- Returns matched affixes {id, type, group, lines}, and the unmatched lines.
+local function matchModLines(item, lines, ilvl)
+	local pool = modPool(item, ilvl)
+	table.sort(pool, function(a, b)
+		if #a.mod ~= #b.mod then return #a.mod > #b.mod end
+		return (a.mod.level or 0) > (b.mod.level or 0)
+	end)
+	local used, matched = {}, {}
+	for _, m in ipairs(pool) do
+		if m.allowed then
+			local idx = {}
+			for _, tmpl in ipairs(m.mod) do
+				local found
+				for i, line in ipairs(lines) do
+					if not used[i] and not idx[i] and lineMatches(tmpl, line) then found = i break end
+				end
+				if not found then idx = nil break end
+				idx[found] = true
+			end
+			if idx and next(idx) then
+				local ls = {}
+				for i in pairs(idx) do used[i] = true ls[#ls + 1] = lines[i] end
+				matched[#matched + 1] = { id = m.id, type = m.mod.type, group = m.mod.group, lines = ls }
+			end
+		end
+	end
+	local unmatched = {}
+	for i, line in ipairs(lines) do if not used[i] then unmatched[#unmatched + 1] = line end end
+	return matched, unmatched
+end
+
+local function affixProblems(matched, limit)
+	local problems, nP, nS, groups = {}, 0, 0, {}
+	for _, m in ipairs(matched) do
+		if m.type == "Prefix" then nP = nP + 1 else nS = nS + 1 end
+		if groups[m.group] then problems[#problems + 1] = "two mods from the same group (" .. tostring(m.group) .. ")" end
+		groups[m.group] = true
+	end
+	if nP > limit then problems[#problems + 1] = ("%d prefixes (max %d)"):format(nP, limit) end
+	if nS > limit then problems[#problems + 1] = ("%d suffixes (max %d)"):format(nS, limit) end
+	return problems, nP, nS
 end
 
 -------------------------------------------------------------------------------
@@ -1422,37 +1605,84 @@ end
 
 function EDIT.create_rare(e, notes)
 	local data = B().data
-	local base = data.itemBases[e.base]
-	if not base then
-		for name, b in pairs(data.itemBases) do
-			if name:lower() == tostring(e.base):lower() then base = b e.base = name break end
+	local baseName, base = findBase(e.base)
+	if not baseName then error("Unknown item base: " .. tostring(e.base) .. " (see search_item_bases)") end
+	local ilvl = e.item_level or 86
+	local lines = { "Rarity: " .. (e.rarity or "RARE"), e.name or "Crafted Item", baseName }
+	local hasAffixes = e.affixes and #e.affixes > 0
+	if hasAffixes then
+		-- Exact affixes by mod id (from list_item_mods), validated against the pool
+		local probe = blankRare(baseName, ilvl)
+		local pool = {}
+		for _, m in ipairs(modPool(probe, ilvl)) do pool[m.id] = m end
+		local limit = probe.affixLimit / 2
+		local nP, nS, groups = 0, 0, {}
+		lines[#lines + 1] = "Crafted: true"
+		for _, a in ipairs(e.affixes) do
+			local id = type(a) == "table" and (a.id or a.mod_id) or a
+			local roll = type(a) == "table" and a.roll or 1
+			local m = pool[id]
+			if not m then error("Mod " .. tostring(id) .. " can't roll on " .. baseName .. " (see list_item_mods)") end
+			if not m.allowed then error(("Mod %s needs item level %d"):format(id, m.mod.level)) end
+			if groups[m.mod.group] then error("Two mods from the same group: " .. tostring(m.mod.group)) end
+			groups[m.mod.group] = true
+			if m.mod.type == "Prefix" then nP = nP + 1 else nS = nS + 1 end
+			lines[#lines + 1] = ("%s: {range:%s}%s"):format(m.mod.type, tostring(roll), id)
+		end
+		if nP > limit or nS > limit then
+			error(("Too many affixes: %d prefixes and %d suffixes (max %d each)"):format(nP, nS, limit))
 		end
 	end
-	if not base then error("Unknown item base: " .. tostring(e.base) .. " (see search_item_bases)") end
-	local lines = { "Rarity: " .. (e.rarity or "RARE"), e.name or "Crafted Item", e.base }
-	lines[#lines + 1] = "Item Level: " .. tostring(e.item_level or 86)
+	lines[#lines + 1] = "Item Level: " .. tostring(ilvl)
 	if e.quality then lines[#lines + 1] = "Quality: " .. tostring(e.quality) end
 	if e.sockets then lines[#lines + 1] = "Sockets: " .. e.sockets end
 	local implicits = e.implicits
 	if implicits == nil and base.implicit then
 		implicits = {}
-		for line in base.implicit:gmatch("[^\n]+") do implicits[#implicits + 1] = line end
+		for line in base.implicit:gmatch("[^\n]+") do implicits[#implicits + 1] = itemLib.applyRange(line, 1) end
 	end
 	lines[#lines + 1] = "Implicits: " .. tostring(#(implicits or {}))
 	for _, l in ipairs(implicits or {}) do lines[#lines + 1] = l end
 	for _, l in ipairs(e.mods or {}) do lines[#lines + 1] = l end
+	for _, l in ipairs(e.crafted or {}) do lines[#lines + 1] = "{crafted}" .. l end
 	local item = new("Item"):Item(table.concat(lines, "\n"))
-	if not item.base then error("Could not build item from base " .. e.base) end
-	-- Report mod lines PoB could not parse, so the agent can fix wording
+	if not item.base then error("Could not build item from base " .. baseName) end
+	if hasAffixes then item:Craft() end
+
+	-- Mod lines PoB can't parse at all
 	local unsupported = {}
 	for _, ml in ipairs(item.explicitModLines or {}) do
 		if ml.extra then unsupported[#unsupported + 1] = ml.line end
 	end
+	-- Free-text mods: check they can roll on this base, and affix limits
+	local warnings = {}
+	if e.mods and #e.mods > 0 then
+		local matched, unmatched = matchModLines(blankRare(baseName, ilvl), e.mods, ilvl)
+		local problems = affixProblems(matched, item.affixLimit > 0 and item.affixLimit / 2 or 3)
+		if hasAffixes then
+			local probe = blankRare(baseName, ilvl)
+			local _, nP, nS = affixProblems(matched, 99)
+			local tot = #e.affixes + nP + nS + #unmatched
+			if tot > (probe.affixLimit or 6) then problems[#problems + 1] = ("%d explicit mods in total (max %d)"):format(tot, probe.affixLimit or 6) end
+		end
+		for _, line in ipairs(unmatched) do
+			warnings[#warnings + 1] = "not a natural mod for this base/item level: " .. line
+		end
+		for _, pr in ipairs(problems) do warnings[#warnings + 1] = pr end
+		if e.strict and #warnings > 0 then
+			error("Item can't exist: " .. table.concat(warnings, "; ") .. ". Use list_item_mods to pick valid mods, or set strict=false.")
+		end
+	end
+	if e.crafted and #e.crafted > 1 then warnings[#warnings + 1] = "only one crafted (bench) mod is allowed" end
+
 	item:NormaliseQuality()
 	item:BuildModList()
 	equipParsed(item, e.slot, notes)
 	if #unsupported > 0 then
 		notes[#notes + 1] = "Warning: PoB does not understand these mod lines: " .. table.concat(unsupported, " | ")
+	end
+	if #warnings > 0 then
+		notes[#notes + 1] = "Warning: this item may not be craftable: " .. table.concat(warnings, "; ")
 	end
 end
 
@@ -1552,6 +1782,1160 @@ function API.auto_allocate(p)
 	for stat in pairs(weights) do after[stat] = readStat(output(), stat) end
 	return { weights = weights, pointsBudget = budget, pointsSpent = spent,
 		allocated = chosen, stoppedBecause = stopReason or "budget used", stats = after, info = info() }
+end
+
+-------------------------------------------------------------------------------
+-- Tree routing: condensed map, route alternatives, exact path allocation
+-------------------------------------------------------------------------------
+
+-- Same traversal rules as PoB's own pathing (PassiveSpec:BuildAllDependsAndPaths):
+-- no passing through class starts, no continuing out of a mastery, no crossing
+-- between the main tree and an ascendancy.
+local function canStep(from, to, fromDist)
+	return from.type ~= "Mastery"
+		and to.type ~= "ClassStart" and to.type ~= "AscendClassStart"
+		and (from.ascendancyName == to.ascendancyName or ((fromDist or 1) == 0 and not to.ascendancyName))
+end
+
+local KEY_TYPES = { Notable = true, Keystone = true, Socket = true, ClassStart = true }
+
+local function isMainTree(node)
+	return not node.ascendancyName and not node.isProxy and not node.expansionSkill
+end
+
+-- "+10 to Strength", "+10 to Strength" -> "2x +10 to Strength"
+local function summariseStats(nodes)
+	local counts, order = {}, {}
+	for _, n in ipairs(nodes) do
+		for _, line in ipairs(n.sd or {}) do
+			if not counts[line] then order[#order + 1] = line counts[line] = 0 end
+			counts[line] = counts[line] + 1
+		end
+	end
+	local out = {}
+	for _, line in ipairs(order) do
+		out[#out + 1] = counts[line] > 1 and (counts[line] .. "x " .. line) or line
+	end
+	return out
+end
+
+local function adjacentMastery(node)
+	for _, l in ipairs(node.linked or {}) do
+		if l.type == "Mastery" then return l end
+	end
+end
+
+-- Unit-cost BFS distance (in passive points) from a set of start nodes, main tree only
+local function bfsDistances(starts, maxDist)
+	local dist, queue, head = {}, {}, 1
+	for _, n in ipairs(starts) do dist[n.id] = 0 queue[#queue + 1] = n end
+	while head <= #queue do
+		local n = queue[head]; head = head + 1
+		local d = dist[n.id]
+		if d < maxDist then
+			for _, o in ipairs(n.linked or {}) do
+				if not dist[o.id] and isMainTree(o) and o.type ~= "Mastery" and n.type ~= "Mastery" then
+					dist[o.id] = d + 1
+					queue[#queue + 1] = o
+				end
+			end
+		end
+	end
+	return dist
+end
+
+function API.tree_map(p)
+	local spec = B().spec
+	-- Whole tree defaults to names only (~13k tokens); a region defaults to full stats
+	local detail = p.detail or ((p.center or p.radius) and "stats" or "names")
+	local withStats = detail ~= "names"
+
+	-- Region filter
+	local inRegion
+	if p.center or p.radius then
+		local starts = {}
+		if p.center then
+			local c = resolveNode(p.center)
+			if not c then error("Node not found: " .. tostring(p.center), 0) end
+			starts[1] = c
+		else
+			for _, n in pairs(spec.allocNodes) do
+				if isMainTree(n) then starts[#starts + 1] = n end
+			end
+		end
+		inRegion = bfsDistances(starts, p.radius or 10)
+	end
+
+	-- Graph contraction. Vertices: notables, keystones, jewel sockets, your class start,
+	-- and small passives where paths branch or end (junctions). Edges: unbranched chains
+	-- of small passives between two vertices.
+	local myStart = spec.curClass and spec.nodes[spec.curClass.startNodeId]
+	local function usable(n)
+		if not isMainTree(n) or n.type == "Mastery" then return false end
+		if n.type == "ClassStart" then return n == myStart end
+		return true
+	end
+	local function nbs(n)
+		local t = {}
+		for _, o in ipairs(n.linked or {}) do if usable(o) then t[#t + 1] = o end end
+		return t
+	end
+	local isVertex = {}
+	for id, node in pairs(spec.nodes) do
+		if usable(node) and (KEY_TYPES[node.type] or #nbs(node) ~= 2) then isVertex[id] = true end
+	end
+
+	local vlist = {}
+	for id in pairs(isVertex) do
+		local node = spec.nodes[id]
+		if not inRegion or inRegion[id] then
+			local vtype = node.type == "Normal" and "Junction" or node.type
+			local v = { id = id, name = node.dn, type = vtype, allocated = node.alloc or nil }
+			if withStats and node.type ~= "ClassStart" then v.stats = node.sd end
+			local m = adjacentMastery(node)
+			if m then v.mastery = m.dn end
+			if inRegion then v.distance = inRegion[id] end
+			if node.path and not node.alloc then v.pathCost = #node.path end
+			vlist[#vlist + 1] = v
+		end
+	end
+
+	local edges, seen = {}, {}
+	for id in pairs(isVertex) do
+		local v = spec.nodes[id]
+		if not inRegion or inRegion[id] then
+			for _, first in ipairs(nbs(v)) do
+				local chain, prev, cur = {}, v, first
+				local guard = 0
+				while cur and not isVertex[cur.id] and guard < 200 do
+					chain[#chain + 1] = cur
+					local nextNode
+					for _, o in ipairs(nbs(cur)) do if o ~= prev then nextNode = o break end end
+					prev, cur = cur, nextNode
+					guard = guard + 1
+				end
+				if cur and cur.id ~= id and (not inRegion or inRegion[cur.id]) then
+					local ids = {}
+					for _, c in ipairs(chain) do ids[#ids + 1] = c.id end
+					table.sort(ids)
+					local a, b = math.min(id, cur.id), math.max(id, cur.id)
+					local k = a .. ":" .. b .. ":" .. table.concat(ids, ",")
+					if not seen[k] then
+						seen[k] = true
+						local allocCount = 0
+						for _, c in ipairs(chain) do if c.alloc then allocCount = allocCount + 1 end end
+						local edge = { a = a, b = b, smallNodes = #chain }
+						if allocCount > 0 then edge.allocatedSmall = allocCount end
+						if withStats and #chain > 0 then edge.stats = summariseStats(chain) end
+						if detail == "full" and #chain > 0 then
+							edge.smallIds = {}
+							-- keep walking order from a to b
+							local ordered = {}
+							for _, c in ipairs(chain) do ordered[#ordered + 1] = c.id end
+							if id ~= a then
+								for i = 1, math.floor(#ordered / 2) do
+									ordered[i], ordered[#ordered - i + 1] = ordered[#ordered - i + 1], ordered[i]
+								end
+							end
+							edge.smallIds = ordered
+						end
+						edges[#edges + 1] = edge
+					end
+				end
+			end
+		end
+	end
+	table.sort(vlist, function(a, b) return a.id < b.id end)
+	table.sort(edges, function(x, y) if x.a ~= y.a then return x.a < y.a end return x.b < y.b end)
+
+	if p.format ~= "json" then
+		-- Compact text: one line per vertex / edge
+		local letter = { Notable = "N", Keystone = "K", Socket = "S", Junction = "J", ClassStart = "C" }
+		local vl, el = {}, {}
+		for _, v in ipairs(vlist) do
+			local line = ("%d %s%s %s"):format(v.id, letter[v.type] or "?", v.allocated and "*" or "", v.name or "")
+			if v.pathCost then line = line .. " +" .. v.pathCost end
+			if v.mastery then line = line .. " [" .. v.mastery .. "]" end
+			if v.stats and #v.stats > 0 then line = line .. " | " .. table.concat(v.stats, "; ") end
+			vl[#vl + 1] = line
+		end
+		for _, e in ipairs(edges) do
+			local line = ("%d-%d %d"):format(e.a, e.b, e.smallNodes)
+			if e.allocatedSmall then line = line .. " (" .. e.allocatedSmall .. " alloc)" end
+			if e.stats then line = line .. " | " .. table.concat(e.stats, "; ") end
+			if e.smallIds then line = line .. " ids:" .. table.concat(e.smallIds, ",") end
+			el[#el + 1] = line
+		end
+		return {
+			legend = "VERTICES: '<id> <type><*=allocated> <name> +<points to reach from current tree> "
+				.. "[adjacent mastery] | stats'. Types: N notable, K keystone, S jewel socket, J junction "
+				.. "(small passive where paths branch), C your class start. EDGES: '<a>-<b> <n> | stats' = "
+				.. "a and b are joined by an unbranched chain of n small passives (0 = adjacent) granting "
+				.. "those stats. Each unallocated node costs 1 point. Allocate with allocate_path "
+				.. "(ids) or get exact routes from find_routes.",
+			region = inRegion and { center = p.center or "allocated tree", radius = p.radius or 10 } or "whole tree",
+			vertexCount = #vlist, edgeCount = #edges,
+			vertices = table.concat(vl, "\n"),
+			edges = table.concat(el, "\n"),
+		}
+	end
+	return {
+		legend = "Vertices are notables, keystones, jewel sockets, your class start, and 'Junction' "
+			.. "small passives where paths branch. An edge a-b is an unbranched chain of `smallNodes` "
+			.. "small passives (0 = directly adjacent); `stats` is what that chain grants. Crossing an "
+			.. "edge to an unallocated vertex costs smallNodes + 1 points, minus allocatedSmall. "
+			.. "Every vertex and small passive costs 1 point; allocated ones are free.",
+		region = inRegion and { center = p.center or "allocated tree", radius = p.radius or 10 } or "whole tree",
+		vertexCount = #vlist, edgeCount = #edges,
+		vertices = vlist, edges = edges,
+	}
+end
+
+-- Minimal binary heap keyed on .d
+local function heapPush(h, item)
+	h[#h + 1] = item
+	local i = #h
+	while i > 1 do
+		local parent = math.floor(i / 2)
+		if h[parent].d <= h[i].d then break end
+		h[parent], h[i] = h[i], h[parent]
+		i = parent
+	end
+end
+local function heapPop(h)
+	local top = h[1]
+	local last = table.remove(h)
+	if #h > 0 then
+		h[1] = last
+		local i = 1
+		while true do
+			local l, r, s = i * 2, i * 2 + 1, i
+			if h[l] and h[l].d < h[s].d then s = l end
+			if h[r] and h[r].d < h[s].d then s = r end
+			if s == i then break end
+			h[s], h[i] = h[i], h[s]
+			i = s
+		end
+	end
+	return top
+end
+
+-- Cheapest path from any "free" node (allocated or already chosen) to target.
+-- Node costs: 0 if free, else 1 + penalty. Returns the paid nodes, tree side first.
+local function dijkstra(target, free, penalty, avoid)
+	local spec = B().spec
+	local dist, prev, h = {}, {}, {}
+	for id, n in pairs(free) do
+		dist[id] = 0
+		heapPush(h, { d = 0, n = n })
+	end
+	while #h > 0 do
+		local item = heapPop(h)
+		local n, d = item.n, item.d
+		if d == dist[n.id] then
+			if n == target then break end
+			for _, o in ipairs(n.linked or {}) do
+				if not avoid[o.id] and canStep(n, o, free[n.id] and 0 or 1) then
+					local cost = free[o.id] and 0 or (1 + (penalty[o.id] or 0))
+					local nd = d + cost
+					if nd < (dist[o.id] or math.huge) then
+						dist[o.id] = nd
+						prev[o.id] = n
+						heapPush(h, { d = nd, n = o })
+					end
+				end
+			end
+		end
+	end
+	if not dist[target.id] then return nil end
+	local path, cur = {}, target
+	while cur and not free[cur.id] do
+		table.insert(path, 1, cur)
+		cur = prev[cur.id]
+	end
+	return path
+end
+
+local function routeThrough(stops, avoid, penalty)
+	local spec = B().spec
+	local free = {}
+	for id, n in pairs(spec.allocNodes) do free[id] = n end
+	local all = {}
+	for _, stop in ipairs(stops) do
+		if not free[stop.id] then
+			local seg = dijkstra(stop, free, penalty, avoid)
+			if not seg then return nil, stop end
+			for _, n in ipairs(seg) do
+				all[#all + 1] = n
+				free[n.id] = n
+			end
+		end
+	end
+	return all
+end
+
+local function describeRoute(nodes)
+	local picks, smalls, ids = {}, {}, {}
+	for _, n in ipairs(nodes) do
+		ids[#ids + 1] = n.id
+		if n.type == "Normal" then smalls[#smalls + 1] = n
+		else picks[#picks + 1] = { id = n.id, name = n.dn, type = n.type } end
+	end
+	return { cost = #nodes, nodeIds = ids, keyNodes = picks, smallNodeStats = summariseStats(smalls) }
+end
+
+function API.find_routes(p)
+	local build = B()
+	local spec = build.spec
+	local target = resolveNode(p.target)
+	if not target then error("Node not found: " .. tostring(p.target), 0) end
+	if target.alloc then error(target.dn .. " is already allocated", 0) end
+
+	local stops = {}
+	for _, v in ipairs(p.via or {}) do
+		local n = resolveNode(v)
+		if not n then error("Via node not found: " .. tostring(v), 0) end
+		stops[#stops + 1] = n
+	end
+	stops[#stops + 1] = target
+	local avoid = {}
+	for _, v in ipairs(p.avoid or {}) do
+		local n = resolveNode(v)
+		if not n then error("Avoid node not found: " .. tostring(v), 0) end
+		if n == target then error("Can't avoid the target", 0) end
+		avoid[n.id] = true
+	end
+
+	local want = p.alternatives or 3
+	local maxExtra = p.max_extra_points or 4
+	local penalty, routes, keys = {}, {}, {}
+	local shortest
+	for attempt = 1, want * 4 do
+		local nodes, blocked = routeThrough(stops, avoid, penalty)
+		if not nodes then
+			if attempt == 1 then
+				error(("No route to %s (blocked by the avoid list or not reachable from the tree)"):format(blocked.dn), 0)
+			end
+			break
+		end
+		local cost = #nodes
+		shortest = shortest or cost
+		if cost > shortest + maxExtra then break end
+		local idsSorted = {}
+		for _, n in ipairs(nodes) do idsSorted[#idsSorted + 1] = n.id end
+		table.sort(idsSorted)
+		local key = table.concat(idsSorted, ",")
+		if not keys[key] then
+			keys[key] = true
+			routes[#routes + 1] = nodes
+			if #routes >= want then break end
+		end
+		-- Discourage reusing this route's nodes so the next search finds a different one
+		for _, n in ipairs(nodes) do
+			local isStop = false
+			for _, s in ipairs(stops) do if s == n then isStop = true end end
+			if not isStop then penalty[n.id] = (penalty[n.id] or 0) + 1.5 end
+		end
+	end
+
+	-- Optional evaluation with PoB's calculator
+	local metrics = p.metrics
+	if (not metrics or #metrics == 0) and p.evaluate ~= false then
+		metrics = { defaultMetric(), "TotalEHP", "Life" }
+	end
+	local calcFunc, base
+	if p.evaluate ~= false then calcFunc, base = build.calcsTab:GetMiscCalculator() end
+
+	local out = {}
+	for i, nodes in ipairs(routes) do
+		local r = describeRoute(nodes)
+		r.route = i
+		r.extraPointsVsShortest = r.cost - shortest
+		if calcFunc then
+			local set = {}
+			for _, n in ipairs(nodes) do set[n] = true end
+			local res = calcFunc({ addNodes = set }, metrics[1] == "FullDPS")
+			r.statChanges = {}
+			for _, m in ipairs(metrics) do
+				local b, a = readStat(base, m), readStat(res, m)
+				if a and b then
+					r.statChanges[m] = { change = a - b, pct = b ~= 0 and (a - b) / math.abs(b) * 100 or nil }
+				end
+			end
+		end
+		out[#out + 1] = r
+	end
+	return {
+		target = { id = target.id, name = target.dn, type = target.type },
+		via = #stops > 1 and (function() local t = {} for i = 1, #stops - 1 do t[i] = stops[i].dn end return t end)() or nil,
+		routes = out,
+		note = "Allocate a route with an allocate_path edit using its nodeIds.",
+	}
+end
+
+function EDIT.allocate_path(e, notes)
+	local spec = B().spec
+	local want = {}
+	for _, ref in ipairs(e.nodes or {}) do
+		local n = resolveNode(ref)
+		if not n then error("Passive node not found: " .. tostring(ref)) end
+		if n.type == "Mastery" then error(n.dn .. " is a mastery; use set_mastery for it") end
+		if n.type == "ClassStart" or n.type == "AscendClassStart" then error("Can't allocate a start node: " .. n.dn) end
+		if not n.alloc then want[#want + 1] = n end
+	end
+	if #want == 0 then notes[#notes + 1] = "All listed nodes were already allocated" return end
+
+	-- Grow from the allocated tree; every listed node must connect via allocated
+	-- nodes or other listed nodes, using PoB's traversal rules.
+	local connected, remaining = {}, {}
+	for id in pairs(spec.allocNodes) do connected[id] = true end
+	for _, n in ipairs(want) do remaining[n.id] = n end
+	local order = {}
+	local progress = true
+	while progress do
+		progress = false
+		for id, n in pairs(remaining) do
+			for _, o in ipairs(n.linked or {}) do
+				if connected[o.id] and canStep(o, n, 0) then
+					connected[id] = true
+					remaining[id] = nil
+					order[#order + 1] = n
+					progress = true
+					break
+				end
+			end
+		end
+	end
+	local bad = {}
+	for _, n in pairs(remaining) do bad[#bad + 1] = ("%s (%d)"):format(n.dn, n.id) end
+	if #bad > 0 then
+		error("These nodes don't connect to the tree or to the other listed nodes: " .. table.concat(bad, ", ")
+			.. ". Add the nodes in between (find_routes gives complete routes).")
+	end
+
+	local rebuildClusters = false
+	for _, n in ipairs(order) do
+		rebuildClusters = rebuildClusters or n.expansionJewel ~= nil
+		n.alloc = true
+		spec.allocNodes[n.id] = n
+		if n.isMultipleChoiceOption then
+			for _, opt in ipairs(n.linked[1].linked) do
+				if opt.isMultipleChoiceOption and opt.alloc and opt ~= n then
+					opt.alloc = false
+					spec.allocNodes[opt.id] = nil
+				end
+			end
+		end
+	end
+	if rebuildClusters then spec:BuildClusterJewelGraphs() else spec:BuildAllDependsAndPaths() end
+	spec:AddUndoState()
+	local named = {}
+	for _, n in ipairs(order) do if n.type ~= "Normal" then named[#named + 1] = n.dn end end
+	notes[#notes + 1] = ("Allocated %d node%s along the given path%s"):format(#order, #order == 1 and "" or "s",
+		#named > 0 and (" incl. " .. table.concat(named, ", ")) or "")
+end
+
+-------------------------------------------------------------------------------
+-- Shared helpers for temporary changes
+-------------------------------------------------------------------------------
+
+-- Runs fn() and then restores the build exactly as it was.
+local function withRestore(fn)
+	local build = B()
+	local snapshot = build:SaveDB("code")
+	local name = build.buildName
+	local ok, res = pcall(fn)
+	main:SetMode("BUILD", false, name, snapshot)
+	frame()
+	if not ok then error(res, 0) end
+	return res
+end
+
+local function resistCap(elem)
+	local env = B().calcsTab.mainEnv
+	local cap = env and env.player.modDB:Sum("BASE", nil, elem .. "ResistMax")
+	if not cap or cap == 0 then cap = 75 end
+	return math.min(cap, 90)
+end
+
+-------------------------------------------------------------------------------
+-- 1. Item mod pools and valid crafted rares
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+-- 2. Resist and attribute gap fixing
+-------------------------------------------------------------------------------
+
+local RES_ELEMS = { "Fire", "Cold", "Lightning" }
+local ATTRS = { Str = "Strength", Dex = "Dexterity", Int = "Intelligence" }
+
+local function currentGaps(p)
+	local out = output()
+	local gaps = {}
+	for _, elem in ipairs(RES_ELEMS) do
+		local cap = resistCap(elem)
+		local total = out[elem .. "ResistTotal"] or out[elem .. "Resist"] or 0
+		if total < cap then gaps[elem] = cap - total end
+	end
+	if p.chaos_target then
+		local total = out.ChaosResistTotal or out.ChaosResist or 0
+		if total < p.chaos_target then gaps.Chaos = p.chaos_target - total end
+	end
+	if p.attributes ~= false then
+		for short in pairs(ATTRS) do
+			local have, need = out[short] or 0, out["Req" .. short] or 0
+			if need > have then gaps[short] = need - have end
+		end
+	end
+	return gaps
+end
+
+-- What a mod line gives toward the gaps
+local function lineContribution(line)
+	local c = {}
+	local l = line:lower()
+	local v = tonumber(l:match("^%+(%d+)"))
+	if not v then return c end
+	if l:find("to all elemental resistances") then
+		c.Fire, c.Cold, c.Lightning = v, v, v
+	elseif l:find("resistance") then
+		for _, elem in ipairs({ "Fire", "Cold", "Lightning", "Chaos" }) do
+			if l:find(elem:lower()) then c[elem] = v end
+		end
+	elseif l:find("to all attributes") then
+		c.Str, c.Dex, c.Int = v, v, v
+	else
+		for short, long in pairs(ATTRS) do
+			if l:find(long:lower()) then c[short] = v end
+		end
+	end
+	return c
+end
+
+local GAP_SLOTS = { "Helmet", "Body Armour", "Gloves", "Boots", "Amulet", "Ring 1", "Ring 2", "Belt", "Weapon 2" }
+
+local function planGearGaps(gaps, roll, notes)
+	local build = B()
+	local itemsTab = build.itemsTab
+	local edits = {}
+	-- Collect rares with free suffixes and their candidate suffix mods
+	local slots = {}
+	for _, slotName in ipairs(GAP_SLOTS) do
+		local slot = itemsTab.slots[slotName]
+		local item = slot and slot.selItemId ~= 0 and itemsTab.items[slot.selItemId]
+		if item and item.rarity == "RARE" and item.base and item.affixes then
+			local lines = {}
+			for _, ml in ipairs(item.explicitModLines or {}) do
+				if not ml.crafted and not ml.implicit then lines[#lines + 1] = ml.line end
+			end
+			local matched, unmatched = matchModLines(item, lines, item.itemLevel or 86)
+			local total = (item.affixLimit and item.affixLimit > 0) and item.affixLimit or 6
+			local limit = total / 2
+			local _, nP, nS = affixProblems(matched, limit)
+			local free = math.min(limit - nS, total - nP - nS - #unmatched)
+			if free > 0 then
+				local usedGroups = {}
+				for _, m in ipairs(matched) do usedGroups[m.group] = true end
+				local cands = {}
+				for _, m in ipairs(modPool(item, item.itemLevel or 86)) do
+					if m.allowed and m.tier and m.mod.type == "Suffix" and #m.mod == 1 and not usedGroups[m.mod.group] then
+						local line = itemLib.applyRange(m.mod[1], roll)
+						local c = lineContribution(line)
+						if next(c) then cands[#cands + 1] = { id = m.id, group = m.mod.group, line = line, contrib = c, tier = m.tier } end
+					end
+				end
+				slots[#slots + 1] = { name = slotName, item = item, free = free, cands = cands, added = {}, usedGroups = usedGroups }
+			end
+		end
+	end
+	-- Greedy: the mod that covers the most remaining gap
+	while next(gaps) do
+		local best, bestSlot, bestCover
+		for _, s in ipairs(slots) do
+			if s.free > 0 then
+				for _, c in ipairs(s.cands) do
+					if not s.usedGroups[c.group] then
+						local cover = 0
+						for k, v in pairs(c.contrib) do
+							if gaps[k] then cover = cover + math.min(v, gaps[k]) end
+						end
+						-- prefer higher tiers on ties
+						cover = cover - c.tier * 0.01
+						if cover > 0 and (not bestCover or cover > bestCover) then best, bestSlot, bestCover = c, s, cover end
+					end
+				end
+			end
+		end
+		if not best then break end
+		bestSlot.free = bestSlot.free - 1
+		bestSlot.usedGroups[best.group] = true
+		table.insert(bestSlot.added, best.line)
+		for k, v in pairs(best.contrib) do
+			if gaps[k] then
+				gaps[k] = gaps[k] - v
+				if gaps[k] <= 0 then gaps[k] = nil end
+			end
+		end
+	end
+	for _, s in ipairs(slots) do
+		if #s.added > 0 then
+			local raw = s.item:BuildRaw()
+			for _, line in ipairs(s.added) do raw = raw .. "\n" .. line end
+			edits[#edits + 1] = { op = "equip_item", slot = s.name, item_text = raw }
+			notes[#notes + 1] = ("%s: add %s"):format(s.name, table.concat(s.added, ", "))
+		end
+	end
+	return edits
+end
+
+local function planTreeGaps(gaps, maxCost, notes)
+	local build = B()
+	local spec = build.spec
+	local edits = {}
+	local keywords = { "resist", "strength", "dexterity", "intelligence", "attributes" }
+	for _ = 1, 30 do
+		if not next(gaps) then break end
+		local calcFunc, base = build.calcsTab:GetMiscCalculator()
+		local best, bestScore
+		for _, node in pairs(spec.nodes) do
+			if not node.alloc and node.path and #node.path > 0 and #node.path <= maxCost
+				and node.type ~= "Mastery" and not node.ascendancyName and node.sd then
+				local text = table.concat(node.sd, " "):lower()
+				local relevant = false
+				for _, k in ipairs(keywords) do if text:find(k, 1, true) then relevant = true break end end
+				if relevant then
+					local set = {}
+					for _, pn in ipairs(node.path) do set[pn] = true end
+					local out = calcFunc({ addNodes = set })
+					local cover = 0
+					for k, need in pairs(gaps) do
+						local key = (k == "Str" or k == "Dex" or k == "Int") and k or (k .. "ResistTotal")
+						local gain = (out[key] or 0) - (base[key] or 0)
+						if gain > 0 then cover = cover + math.min(gain, need) end
+					end
+					local sc = cover / #node.path
+					if sc > 0 and (not bestScore or sc > bestScore) then best, bestScore = node, sc end
+				end
+			end
+		end
+		if not best then break end
+		local ids = {}
+		for _, pn in ipairs(best.path) do ids[#ids + 1] = pn.id end
+		spec:AllocNode(best)
+		rebuild()
+		edits[#edits + 1] = { op = "allocate_path", nodes = ids }
+		notes[#notes + 1] = ("Tree: %s (%d point%s)"):format(best.dn, #ids, #ids == 1 and "" or "s")
+		local fresh = currentGaps({ chaos_target = gaps.Chaos and (output().ChaosResistTotal or 0) + gaps.Chaos or nil })
+		for k in pairs(gaps) do gaps[k] = fresh[k] end
+	end
+	return edits
+end
+
+function API.fix_gaps(p)
+	local before = currentGaps(p)
+	if not next(before) then return { gapsBefore = {}, edits = {}, note = "Nothing to fix: resists capped and attributes met" } end
+	local mode = p.mode or "both"
+	local roll = p.roll or 0.75
+	local maxCost = p.max_tree_cost or 3
+	return withRestore(function()
+		local statsBefore = pickStats(SUMMARY_KEYS)
+		local notes, edits = {}, {}
+		local gaps = {}
+		for k, v in pairs(before) do gaps[k] = v end
+		if mode == "gear" or mode == "both" then
+			for _, e in ipairs(planGearGaps(gaps, roll, notes)) do edits[#edits + 1] = e end
+			if #edits > 0 then applyEdits(edits) end
+			gaps = currentGaps(p)
+		end
+		if (mode == "tree" or mode == "both") and next(gaps) then
+			for _, e in ipairs(planTreeGaps(gaps, maxCost, notes)) do edits[#edits + 1] = e end
+		end
+		local after = currentGaps(p)
+		return {
+			gapsBefore = before, gapsAfter = after, edits = edits, plan = notes,
+			changes = diff(statsBefore, pickStats(SUMMARY_KEYS), SUMMARY_KEYS),
+			note = #edits > 0 and "Preview only. Pass these edits to apply_changes, or call fix_gaps with apply=true."
+				or "No free suffixes on rare gear and no cheap tree nodes found.",
+		}
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- 3. Trade stat weights for a slot
+-------------------------------------------------------------------------------
+
+local PSEUDO = {
+	["3372524247"] = "pseudo.pseudo_total_fire_resistance",
+	["4220027924"] = "pseudo.pseudo_total_cold_resistance",
+	["1671376347"] = "pseudo.pseudo_total_lightning_resistance",
+	["2923486259"] = "pseudo.pseudo_total_chaos_resistance",
+	["4080418644"] = "pseudo.pseudo_total_strength",
+	["3261801346"] = "pseudo.pseudo_total_dexterity",
+	["328541901"] = "pseudo.pseudo_total_intelligence",
+}
+
+function API.trade_weights(p)
+	local build = B()
+	local itemsTab = build.itemsTab
+	local slot = itemsTab.slots[p.slot]
+	if not slot then error("Unknown slot: " .. tostring(p.slot), 0) end
+	local current = slot.selItemId ~= 0 and itemsTab.items[slot.selItemId] or nil
+	local baseName = p.base and findBase(p.base) or (current and current.baseName)
+	if not baseName then error("Slot is empty; pass `base` to choose an item base", 0) end
+	local function calcItem(extraLine)
+		local raw = ("Rarity: RARE\nTest\n%s\nItem Level: 86\nImplicits: 0"):format(baseName)
+		if extraLine then raw = raw .. "\n" .. extraLine end
+		local it = new("Item"):Item(raw)
+		it:BuildModList()
+		return it
+	end
+	local blank = calcItem()
+	local weights = p.weights
+	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
+	local calcFunc = build.calcsTab:GetMiscCalculator()
+	local baseOut = calcFunc({ repSlotName = p.slot, repItem = blank })
+	local bases = {}
+	for stat in pairs(weights) do bases[stat] = readStat(baseOut, stat) end
+
+	local results = {}
+	local seen = {}
+	local _, byGroup = modPool(blankRare(baseName, 86), 86)
+	local bestPerGroup = {}
+	for _, list in pairs(byGroup) do
+		for _, m in ipairs(list) do
+			if m.allowed then bestPerGroup[#bestPerGroup + 1] = m break end
+		end
+	end
+	for _, m in ipairs(bestPerGroup) do
+		if #m.mod == 1 and m.mod.tradeHashes and not seen[m.mod.group] then
+			do
+				local hash
+				for h in pairs(m.mod.tradeHashes) do hash = tostring(h) end
+				local line = itemLib.applyRange(m.mod[1], 1)
+				local value = tonumber(line:match("([%d%.]+)"))
+				if hash and value and value > 0 then
+					seen[m.mod.group] = true
+					local out = calcFunc({ repSlotName = p.slot, repItem = calcItem(line) })
+					local score = 0
+					for stat, w in pairs(weights) do
+						local b, a = bases[stat], readStat(out, stat)
+						if a and b then
+							if b ~= 0 then score = score + w * (a - b) / math.abs(b) * 100
+							elseif a > 0 then score = score + w * 100 end
+						end
+					end
+					if score > 0.001 then
+						results[#results + 1] = {
+							tradeId = PSEUDO[hash] or ("explicit.stat_" .. hash),
+							text = m.mod[1], exampleValue = value,
+							weightPerUnit = score / value, scoreAtExample = score,
+						}
+					end
+				end
+			end
+		end
+	end
+	table.sort(results, function(a, b) return a.scoreAtExample > b.scoreAtExample end)
+	while #results > (p.max_stats or 25) do table.remove(results) end
+	-- Normalise so the most valuable stat has weight 10 per unit-of-best-roll
+	local top = results[1] and results[1].weightPerUnit or 1
+	for _, r in ipairs(results) do r.weight = math.floor(r.weightPerUnit / top * 1000 + 0.5) / 100 end
+
+	-- Weighted value of the current item, to use as a minimum
+	local currentSum
+	if current then
+		currentSum = 0
+		for _, ml in ipairs(current.explicitModLines or {}) do
+			local v = tonumber(ml.line:match("([%d%.]+)"))
+			if v then
+				for _, r in ipairs(results) do
+					if lineMatches(r.text, ml.line) then currentSum = currentSum + v * r.weight break end
+				end
+			end
+		end
+	end
+	local tradeHelpers = require("Classes.TradeHelpers")
+	local category = tradeHelpers.getTradeCategory(p.slot, current or blank)
+	return {
+		slot = p.slot, base = baseName, category = category, weightsUsed = weights,
+		currentItem = current and current.name or nil, currentWeightedSum = currentSum,
+		stats = results,
+	}
+end
+
+-------------------------------------------------------------------------------
+-- 4. Stat breakdowns and modifier sources
+-------------------------------------------------------------------------------
+
+local function describeSource(source)
+	if type(source) ~= "string" then return tostring(source) end
+	local spec = B().spec
+	local nodeId = source:match("^Tree:(%d+)")
+	if nodeId then
+		local n = spec.nodes[tonumber(nodeId)]
+		return "Tree: " .. (n and n.dn or nodeId)
+	end
+	local itemName = source:match("^Item:%d+:(.+)")
+	if itemName then return "Item: " .. itemName end
+	return (source:gsub(":", ": ", 1))
+end
+
+local function breakdownLines(b)
+	local lines = {}
+	if type(b) ~= "table" then return lines end
+	for _, l in ipairs(b) do
+		if type(l) == "string" then lines[#lines + 1] = cleanText(l) end
+	end
+	if b.slots then
+		for _, s in ipairs(b.slots) do
+			lines[#lines + 1] = ("%s: %s"):format(tostring(s.label or s.slotName or "slot"), tostring(s.base or s.total or ""))
+		end
+	end
+	return lines
+end
+
+function API.explain_stat(p)
+	local build = B()
+	-- The Calcs-tab environment is the one PoB builds breakdowns for
+	local env = build.calcsTab.calcsEnv or build.calcsTab.mainEnv
+	local player = env.player
+	local stat = p.stat
+	local res = { stat = stat, value = num(output()[stat]) }
+	res.breakdown = breakdownLines(player.breakdown and player.breakdown[stat])
+	local skill = player.mainSkill
+	if #res.breakdown == 0 and skill and skill.breakdown then
+		res.breakdown = breakdownLines(skill.breakdown[stat])
+	end
+	-- Modifier sources
+	local modName = p.mod_name or stat:gsub("^Total", ""):gsub("Unreserved$", "")
+	local sources = {}
+	for _, modType in ipairs({ "BASE", "INC", "MORE", "OVERRIDE" }) do
+		local okA, rows = pcall(function()
+			if skill and skill.skillModList and p.skill ~= false then
+				return skill.skillModList:Tabulate(modType, skill.skillCfg, modName)
+			end
+			return player.modDB:Tabulate(modType, nil, modName)
+		end)
+		if okA then
+			for _, row in ipairs(rows or {}) do
+				if type(row.value) == "number" and row.value ~= 0 then
+					sources[#sources + 1] = { type = modType, value = row.value, source = describeSource(row.mod.source),
+						flags = (row.mod.flags ~= 0 or row.mod.keywordFlags ~= 0) and "conditional" or nil }
+				end
+			end
+		end
+	end
+	table.sort(sources, function(a, b)
+		if a.type ~= b.type then return a.type < b.type end
+		return math.abs(a.value) > math.abs(b.value)
+	end)
+	local limit = p.limit or 40
+	while #sources > limit do table.remove(sources) end
+	res.modName = modName
+	-- Totals by modifier type (PoB only writes a breakdown when there is something to combine)
+	local base, inc, more = 0, 0, 1
+	for _, src in ipairs(sources) do
+		if not src.flags then
+			if src.type == "BASE" then base = base + src.value
+			elseif src.type == "INC" then inc = inc + src.value
+			elseif src.type == "MORE" then more = more * (1 + src.value / 100) end
+		end
+	end
+	res.totals = { base = base, increased = inc, moreMultiplier = math.floor(more * 1000 + 0.5) / 1000 }
+	res.sources = sources
+	if #res.breakdown == 0 and #sources == 0 then
+		res.note = "No breakdown or sources found. Stat names are as in get_stats; try mod_name for the "
+			.. "underlying modifier, e.g. stat 'CritChance' / mod_name 'CritChance', stat 'Life' / mod_name 'Life'."
+	end
+	return res
+end
+
+-------------------------------------------------------------------------------
+-- 5. Scenarios
+-------------------------------------------------------------------------------
+
+local SCENARIO_PRESETS = {
+	mapping = { enemyIsBoss = "None" },
+	boss = { enemyIsBoss = "Pinnacle" },
+	uber = { enemyIsBoss = "Uber" },
+}
+local SCENARIO_STATS = { "FullDPS", "CombinedDPS", "TotalDPS", "TotalDotDPS", "TotalEHP", "Life", "EnergyShield",
+	"PhysicalMaximumHitTaken", "FireMaximumHitTaken", "ColdMaximumHitTaken", "LightningMaximumHitTaken",
+	"ChaosMaximumHitTaken" }
+
+function API.scenarios(p)
+	local scen = p.scenarios
+	if not scen or next(scen) == nil then scen = SCENARIO_PRESETS end
+	local stats = (p.stats and #p.stats > 0) and p.stats or SCENARIO_STATS
+	local out = {}
+	for name, cfg in pairs(scen) do
+		if type(cfg) == "string" then cfg = SCENARIO_PRESETS[cfg] or error("Unknown preset " .. cfg, 0) end
+		out[name] = withRestore(function()
+			local configTab = B().configTab
+			for var, value in pairs(cfg) do configTab.input[var] = value end
+			configTab:BuildModList()
+			rebuild()
+			return { config = cfg, stats = pickStats(stats) }
+		end)
+	end
+	return { scenarios = out, presets = SCENARIO_PRESETS }
+end
+
+-------------------------------------------------------------------------------
+-- 7. Tree specs and leveling plans
+-------------------------------------------------------------------------------
+
+local TREE_URL = "https://www.pathofexile.com/passive-skill-tree/"
+
+function API.tree_specs()
+	local treeTab = B().treeTab
+	local res = {}
+	for i, spec in ipairs(treeTab.specList) do
+		local used, asc = spec:CountAllocNodes()
+		res[#res + 1] = { index = i, title = spec.title or ("Tree " .. i), active = i == treeTab.activeSpec,
+			pointsUsed = used, ascendancyPointsUsed = asc, className = spec.curClassName,
+			ascendancy = spec.curAscendClassName }
+	end
+	return { specs = res }
+end
+
+local function findSpec(ref)
+	local treeTab = B().treeTab
+	local idx = tonumber(ref)
+	if idx and treeTab.specList[idx] then return idx end
+	for i, spec in ipairs(treeTab.specList) do
+		if (spec.title or ""):lower() == tostring(ref):lower() then return i end
+	end
+	error("No tree spec " .. tostring(ref) .. " (see list_tree_specs)")
+end
+
+local function addSpec(title, copyFrom)
+	local build = B()
+	local treeTab = build.treeTab
+	local src = copyFrom or build.spec
+	local spec = new("PassiveSpec"):PassiveSpec(build, src.treeVersion)
+	spec.title = title
+	if copyFrom then
+		spec:DecodeURL(src:EncodeURL(TREE_URL))
+	else
+		spec:SelectClass(src.curClassId)
+		spec:SelectAscendClass(src.curAscendClassId)
+	end
+	table.insert(treeTab.specList, spec)
+	return #treeTab.specList, spec
+end
+
+function EDIT.add_tree_spec(e, notes)
+	local treeTab = B().treeTab
+	local idx = addSpec(e.label or ("Tree " .. (#treeTab.specList + 1)), e.copy ~= false and B().spec or nil)
+	treeTab:SetActiveSpec(idx)
+	notes[#notes + 1] = ("Added tree spec %d (%s) and made it active"):format(idx, e.label or "")
+end
+
+function EDIT.switch_tree_spec(e, notes)
+	local idx = findSpec(e.spec)
+	B().treeTab:SetActiveSpec(idx)
+	notes[#notes + 1] = "Active tree spec: " .. idx
+end
+
+function EDIT.rename_tree_spec(e, notes)
+	local idx = findSpec(e.spec or B().treeTab.activeSpec)
+	B().treeTab.specList[idx].title = e.label
+	notes[#notes + 1] = ("Renamed spec %d to %s"):format(idx, e.label)
+end
+
+function EDIT.delete_tree_spec(e, notes)
+	local treeTab = B().treeTab
+	local idx = findSpec(e.spec)
+	if #treeTab.specList == 1 then error("Can't delete the only tree spec") end
+	table.remove(treeTab.specList, idx)
+	treeTab:SetActiveSpec(math.min(treeTab.activeSpec == idx and 1 or treeTab.activeSpec, #treeTab.specList))
+	notes[#notes + 1] = "Deleted spec " .. idx
+end
+
+local QUEST_POINTS = { { 1, 0 }, { 12, 2 }, { 22, 4 }, { 32, 6 }, { 40, 7 }, { 44, 9 }, { 50, 12 }, { 54, 15 }, { 60, 18 }, { 64, 20 }, { 67, 23 } }
+local function pointsAtLevel(level)
+	local q = 0
+	for _, a in ipairs(QUEST_POINTS) do if level >= a[1] then q = a[2] end end
+	return (level - 1) + q
+end
+local function ascPointsAtLevel(level)
+	if level >= 75 then return 8 elseif level >= 68 then return 6 elseif level >= 55 then return 4
+	elseif level >= 33 then return 2 end
+	return 0
+end
+
+-- Allocates, greedily by weighted value per point, nodes of `allowed` reachable
+-- through `allowed` nodes only, until `budget` points are spent.
+local function growWithin(spec, allowed, budget, weights, ascBudget)
+	local build = B()
+	local spent, ascSpent = 0, 0
+	local picked = {}
+	while true do
+		local calcFunc, base = build.calcsTab:GetMiscCalculator()
+		local bases = {}
+		for stat in pairs(weights) do bases[stat] = readStat(base, stat) end
+		-- BFS from allocated nodes through allowed nodes only
+		local prev, queue, head = {}, {}, 1
+		for id, n in pairs(spec.allocNodes) do prev[id] = false queue[#queue + 1] = n end
+		while head <= #queue do
+			local n = queue[head]; head = head + 1
+			for _, o in ipairs(n.linked or {}) do
+				if prev[o.id] == nil and allowed[o.id] and canStep(n, o, n.alloc and 0 or 1) then
+					prev[o.id] = n
+					queue[#queue + 1] = o
+				end
+			end
+		end
+		local best, bestScore, bestPath
+		for id, node in pairs(allowed) do
+			if not node.alloc and prev[id] ~= nil and (node.type ~= "Normal" or node.ascendancyName) then
+				local path, cur = {}, node
+				while cur and not cur.alloc do table.insert(path, 1, cur) cur = prev[cur.id] end
+				local isAsc = node.ascendancyName ~= nil
+				local fits = isAsc and (ascSpent + #path <= ascBudget) or (not isAsc and spent + #path <= budget)
+				if fits and #path > 0 then
+					local set = {}
+					for _, pn in ipairs(path) do set[pn] = true end
+					local sc = weightedScore(weights, bases, calcFunc({ addNodes = set })) / #path
+					if isAsc then sc = sc + 1000 end -- ascendancy points are free to spend
+					if not bestScore or sc > bestScore then best, bestScore, bestPath = node, sc, path end
+				end
+			end
+		end
+		if not best then break end
+		for _, pn in ipairs(bestPath) do
+			pn.alloc = true
+			spec.allocNodes[pn.id] = pn
+		end
+		spec:BuildAllDependsAndPaths()
+		if best.ascendancyName then ascSpent = ascSpent + #bestPath else spent = spent + #bestPath end
+		picked[#picked + 1] = best.dn
+		rebuild()
+	end
+	-- Spend leftover points on remaining allowed nodes (travel/small nodes)
+	local progress = true
+	while progress and spent < budget do
+		progress = false
+		for id, node in pairs(allowed) do
+			if spent >= budget then break end
+			if not node.alloc and not node.ascendancyName then
+				for _, o in ipairs(node.linked or {}) do
+					if o.alloc and canStep(o, node, 0) then
+						node.alloc = true
+						spec.allocNodes[id] = node
+						spent = spent + 1
+						progress = true
+						break
+					end
+				end
+			end
+		end
+	end
+	spec:BuildAllDependsAndPaths()
+	rebuild()
+	return spent, ascSpent, picked
+end
+
+function API.plan_leveling(p)
+	local build = B()
+	local treeTab = build.treeTab
+	local finalIdx = treeTab.activeSpec
+	local final = build.spec
+	local levels = (p.levels and #p.levels > 0) and p.levels or { 30, 50, 70, 90 }
+	table.sort(levels)
+	local weights = p.weights
+	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 1 } end
+	local allowed = {}
+	for id, n in pairs(final.allocNodes) do
+		if n.type ~= "Mastery" then allowed[id] = n end
+	end
+	local finalUsed = final:CountAllocNodes()
+	local savedLevel, savedAuto = build.characterLevel, build.characterLevelAutoMode
+	local plan = {}
+	for _, level in ipairs(levels) do
+		local budget = math.min(pointsAtLevel(level), finalUsed)
+		local idx, spec = addSpec(("Level %d"):format(level), nil)
+		treeTab:SetActiveSpec(idx)
+		build.characterLevel = level
+		build.characterLevelAutoMode = false
+		rebuild()
+		-- nodes are shared objects per spec; map allowed ids to this spec's nodes
+		local allowedHere = {}
+		for id in pairs(allowed) do allowedHere[id] = spec.nodes[id] end
+		local spent, ascSpent, picked = growWithin(spec, allowedHere, budget, weights, ascPointsAtLevel(level))
+		local stats = pickStats({ defaultMetric(), "Life", "TotalEHP" })
+		plan[#plan + 1] = { spec = idx, level = level, pointsBudget = budget, pointsUsed = spent,
+			ascendancyPoints = ascSpent, keyNodesInOrder = picked, stats = stats }
+	end
+	treeTab:SetActiveSpec(finalIdx)
+	build.characterLevel, build.characterLevelAutoMode = savedLevel, savedAuto
+	rebuild()
+	return { plan = plan, finalSpec = finalIdx,
+		note = "Each level gets its own tree spec, built only from nodes in the final tree. "
+			.. "Stats are calculated at that level with current gear and gems. Switch with switch_tree_spec." }
+end
+
+-------------------------------------------------------------------------------
+-- 8. Tree render data
+-------------------------------------------------------------------------------
+
+function API.tree_render(p)
+	local spec = B().spec
+	local highlight = {}
+	for _, id in ipairs(p.highlight or {}) do
+		local n = resolveNode(id)
+		if n then highlight[n.id] = true end
+	end
+	local nodes, edges, seen = {}, {}, {}
+	for id, n in pairs(spec.nodes) do
+		if n.x and n.y then
+			if isMainTree(n) then
+				nodes[#nodes + 1] = { id, math.floor(n.x), math.floor(n.y),
+					({ Normal = "n", Notable = "N", Keystone = "K", Socket = "S", Mastery = "M", ClassStart = "C" })[n.type] or "n",
+					n.alloc and 1 or 0, highlight[id] and 1 or 0 }
+				for _, o in ipairs(n.linked or {}) do
+					if isMainTree(o) and o.x and n.type ~= "Mastery" and o.type ~= "Mastery" then
+						local a, b = math.min(id, o.id), math.max(id, o.id)
+						local k = a .. ":" .. b
+						if not seen[k] then
+							seen[k] = true
+							edges[#edges + 1] = { a, b }
+						end
+					end
+				end
+			end
+		end
+	end
+	local labels = {}
+	for id, n in pairs(spec.nodes) do
+		if isMainTree(n) and n.x and (n.type == "Keystone" or (n.alloc and n.type == "Notable") or highlight[id] and n.type ~= "Normal") then
+			labels[#labels + 1] = { id, n.dn }
+		end
+	end
+	return { nodes = nodes, edges = edges, labels = labels, className = spec.curClassName,
+		ascendancy = spec.curAscendClassName }
+end
+
+-------------------------------------------------------------------------------
+-- 9. Character import
+-------------------------------------------------------------------------------
+
+function API.import_character(p)
+	local charData = json.decode(p.character_json)
+	if type(charData) ~= "table" then error("Invalid character JSON", 0) end
+	if charData.character then charData = charData.character end
+	main:SetMode("BUILD", false, (charData.name or "Imported character"))
+	frame()
+	local build = B()
+	build.importTab:ImportPassiveTreeAndJewels(charData, true)
+	frame()
+	if charData.equipment or charData.items then
+		charData.equipment = charData.equipment or charData.items
+		build.importTab:ImportItemsAndSkills(charData, true, true, false)
+	end
+	rebuild()
+	return info()
 end
 
 -------------------------------------------------------------------------------

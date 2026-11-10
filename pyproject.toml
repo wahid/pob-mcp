@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pob-mcp"
-version = "0.1.0"
+version = "0.3.0"
 description = "MCP server that runs Path of Building Community's Lua calc engine headlessly"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.2", "lupa>=2.0"]
+dependencies = ["mcp>=1.2", "lupa>=2.0", "pillow>=9.2"]
 
 [project.scripts]
 pob-mcp = "pob_mcp.server:main"
@@ -18,3 +18,10 @@ packages = ["src/pob_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/pob_mcp/bridge.lua" = "pob_mcp/bridge.lua"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["online: needs internet access (poe.ninja, pathofexile.com)"]

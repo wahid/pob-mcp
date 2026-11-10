@@ -21,6 +21,10 @@ for the same build and config.
 | `get_passive_tree` | Keystones, notables, masteries, ascendancy nodes, tree URL |
 | `get_config` / `list_config_options` | Current Configuration tab values / all options and choices |
 | `get_warnings` | PoB's own warnings plus uncapped resists, unmet requirements, over-reservation, point overspend, gem errors |
+| `explain_stat` | Where a stat comes from: PoB's breakdown plus every modifier source (tree node, item, gem) with its value |
+| `evaluate_scenarios` | The build against mapping, pinnacle-boss and uber-boss setups (or your own config sets) in one call |
+| `compare_builds` | Diff the loaded build against another (stats, keystones, notables, gems, gear) |
+| `render_tree` | A picture of the passive tree with allocated nodes and an optional route highlighted |
 
 **Changing and optimising**
 
@@ -31,7 +35,11 @@ for the same build and config.
 | `undo_last_change` | Roll back the last `apply_changes` or `auto_allocate_passives` |
 | `rank_passives` | Rank reachable notables/keystones by gain per point (or allocated ones by least value, for respecs) for any stat |
 | `rank_support_gems` | Rank every compatible support gem for a link, as an extra gem or as a replacement, plus what each current support contributes |
+| `fix_gaps` | Close resist and attribute gaps with valid suffixes in free slots on rare gear, then the cheapest tree nodes; preview or apply |
+| `trade_search` | A pathofexile.com trade search for upgrades in a slot: every mod that can roll there is weighted by its PoB-calculated value |
+| `price_check` | poe.ninja prices for uniques, or for everything unique the build wears |
 | `export_build` | Share code or XML, optionally saved to a file |
+| `save_to_pob` | Save into PoB's Builds folder so it shows up in the PoB app |
 
 **Creating builds**
 
@@ -42,10 +50,16 @@ for the same build and config.
 | `search_gems` | Skill and support gems by name or tags, with descriptions |
 | `search_uniques` | PoB's unique database by name, base, type or mod text |
 | `search_item_bases` | Item bases for crafting rares, with implicits and base stats |
+| `list_item_mods` | The mods that can actually roll on a base, with tiers and mod ids for `create_rare` |
 | `find_passive_nodes` | Notables, keystones, jewel sockets and ascendancy nodes by name or stat text, with path cost |
+| `get_tree_map` | The passive tree as a condensed graph (notables, keystones, sockets and branch points, joined by chains of small passives with their stats); whole tree or a region |
+| `find_routes` | 2–3 distinct cheapest routes to a node, with `via` / `avoid`, what each route picks up, and PoB-calculated stat changes |
 | `list_mastery_effects` | Mastery options, for one mastery or every one you can allocate now |
 | `list_item_slots` | Gear slots plus allocated tree jewel sockets |
 | `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}` |
+| `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree, most valuable nodes first |
+| `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
+| `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |
 
 ### Edit operations
 
@@ -54,9 +68,10 @@ Used by `compare_changes` and `apply_changes`. Several edits can go in one call.
 | Area | Operations |
 |---|---|
 | Character | `set_class`, `set_ascendancy`, `set_level` |
-| Passive tree | `allocate_node` (shortest path; works for ascendancy nodes and jewel sockets), `deallocate_node`, `set_mastery` |
+| Passive tree | `allocate_node` (shortest path; works for ascendancy nodes and jewel sockets), `allocate_path` (exactly the listed nodes, e.g. a route from `find_routes`), `deallocate_node`, `set_mastery` |
+| Tree specs | `add_tree_spec`, `switch_tree_spec`, `rename_tree_spec`, `delete_tree_spec` |
 | Skills | `create_socket_group`, `delete_socket_group`, `add_gem`, `remove_gem`, `replace_gem`, `set_gem`, `set_main_skill`, `set_group_enabled` |
-| Items | `equip_unique`, `create_rare` (base + mod lines; reports lines PoB can't parse), `equip_item` (pasted item text), `unequip_slot` |
+| Items | `equip_unique`, `create_rare` (exact `affixes` by mod id, always valid; or free-text `mods`, checked against the base's mod pool), `equip_item` (pasted item text), `unequip_slot` |
 | Config | `set_config`, `add_custom_mod` |
 
 Gem names work with or without the "Support" suffix.
@@ -80,8 +95,8 @@ Gem names work with or without the "Support" suffix.
    For development, use `pip install -e ./pob-mcp` so code changes take effect without
    reinstalling.
 
-   This pulls in `mcp` and `lupa`. `lupa` ships its own LuaJIT, so there's nothing else to
-   install — no system Lua, no luarocks.
+   This pulls in `mcp`, `lupa` and `pillow` (for tree pictures). `lupa` ships its own
+   LuaJIT, so there's nothing else to install — no system Lua, no luarocks.
 
 3. **Add it to Claude Desktop** (`claude_desktop_config.json`):
 
@@ -148,23 +163,73 @@ MCP client ⇄ stdio ⇄ server.py (FastMCP/MCPServer)
 - `Inflate`/`Deflate` use Python's zlib.
 - Nothing is written to stdout except MCP traffic; PoB's console output goes to stderr.
 
+### Passive tree routing
+
+`get_tree_map` gives the agent the tree in a form it can reason about. Of the tree's ~2,900
+nodes, the map keeps notables, keystones, jewel sockets, the class start and the small
+passives where paths branch (~970 points); every unbranched run of small passives becomes one
+edge with its length and stats:
+
+```
+50338 N Ballistics +5 | 20% increased Projectile Speed; 20% increased Projectile Damage; +20 to Dexterity
+465 J Projectile Damage and Attack Speed +2 | 4% increased Attack Speed; 10% increased Projectile Damage
+465-50338 3 | 3x 4% increased Attack Speed
+```
+
+The whole main tree is ~13k tokens with names only; a 10-point region around the current
+tree with full stats is ~7k. `find_routes` and `allocate_path` use the same pathing rules as
+PoB: no passing through class starts, no continuing out of a mastery, no crossing between the
+main tree and an ascendancy.
+
+New builds without a level use PoB's auto-level mode, so the level (and level-based stats)
+follows the points allocated. Pass a level to `new_build` to plan at a fixed level.
+
 ### How an agent creates a build
 
 1. `new_build` with an ascendancy and level.
 2. `search_gems`, then a `create_socket_group` edit with `set_main` for the main skill, plus
    groups for auras, movement and so on.
-3. Gear: `search_uniques` + `equip_unique`, or `search_item_bases` + `create_rare` with the mods
-   it wants (resists, life, damage). Rares can be any combination of real mod lines, so the
-   result is a target to trade or craft for, not a specific item that exists.
-4. Ascendancy notables, keystones and must-have notables with `allocate_node`.
+3. Gear: `search_uniques` + `equip_unique`, or `search_item_bases` + `list_item_mods` +
+   `create_rare` with exact `affixes`, which guarantees an item that can exist (right mod pool,
+   item level, 3 prefixes / 3 suffixes, one mod per group).
+4. Ascendancy notables, keystones and must-have notables. For control over the route, look
+   at the area with `get_tree_map`, compare options with `find_routes`, and allocate the
+   chosen one with an `allocate_path` edit; `allocate_node` takes the shortest path.
 5. `auto_allocate_passives` for the remaining points, then `set_mastery` (each costs a point).
-6. `get_warnings`, fix resists, attributes and reservation, and repeat.
-7. `export_build` for the share code.
+6. `get_warnings`, then `fix_gaps` for resists and attributes.
+7. Optionally `plan_leveling`, `trade_search` per slot and `price_check` for the uniques.
+8. `export_build` for the share code, or `save_to_pob`.
 
 `auto_allocate_passives` is greedy: it picks the best notable per point one step at a time,
 which is fast and usually good, but it doesn't plan long paths toward distant clusters. Guide
 it by allocating a few target notables first, or using `avoid`. A full tree takes 15–40
 seconds; if it reaches its time limit, the progress is kept and calling it again continues.
+
+### Online features
+
+`trade_search`, `price_check` and `import_character` use the internet; everything else runs
+offline.
+
+- **Prices** come from [poe.ninja](https://poe.ninja/docs/api). Responses are cached for 15
+  minutes, matching how often poe.ninja updates, and requests identify the app. poe.ninja asks
+  that published apps route requests through their own backend; for personal use on your own
+  machine this is that backend. Leave these tools unused if you'd rather not call poe.ninja.
+- **Trade searches** are returned as links to open in your browser. pob-mcp doesn't query the
+  trade site itself.
+- **Character import** uses the same public profile pages as PoB's Import tab, so the
+  profile's Characters tab must be public. Account names need their `#1234` suffix.
+
+## Testing
+
+```
+pip install -e ".[test]"
+POB_PATH=/path/to/PathOfBuilding pytest            # offline tests (~40 s)
+POB_PATH=/path/to/PathOfBuilding pytest -m online  # poe.ninja check
+```
+
+The suite drives PoB through every tool area using test builds that ship with PoB, plus one
+test that starts the real server over stdio. `.github/workflows/test.yml` runs it on every push
+and weekly against the latest PoB, so a league update that breaks something shows up quickly.
 
 ## Limitations
 
@@ -172,6 +237,9 @@ seconds; if it reaches its time limit, the progress is kept and calling it again
 - No character import from the PoE website (load a build code or XML instead).
 - Cluster jewel notables and timeless-jewel seeds can't be edited with the edit ops; edit
   them in PoB, or use `add_custom_mod` to approximate a stat.
-- `create_rare` accepts any mod lines, including combinations that can't roll together in
-  the game. Treat crafted rares as targets.
+- `create_rare` with free-text `mods` only warns about mods that can't roll (or errors with
+  `strict`); use `affixes` for guaranteed-valid items. Influence, veiled, fractured and essence
+  mods aren't in the pool; one bench craft can be added with `crafted`.
+- `fix_gaps` fills free suffixes on rare gear and cheap tree nodes; it doesn't replace
+  existing mods or swap uniques.
 - Weapon swap slots are hidden from `list_item_slots`.

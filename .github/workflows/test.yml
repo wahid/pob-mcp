@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly, to catch Path of Building updates
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Get Path of Building
+        run: git clone --depth 1 https://github.com/PathOfBuildingCommunity/PathOfBuilding pob
+      - name: Install
+        run: pip install -e ".[test]"
+      - name: Test
+        env:
+          POB_PATH: ${{ github.workspace }}/pob
+        run: pytest -q

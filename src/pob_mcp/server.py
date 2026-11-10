@@ -10,6 +10,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -20,7 +21,7 @@ except ImportError:  # MCP Python SDK 1.x
     from mcp.server.fastmcp import FastMCP, Image
 from pydantic import BaseModel, Field
 
-from . import online
+from . import library, online
 from .engine import PobEngine, PobError, encode_build_code
 
 log = logging.getLogger("pob_mcp")
@@ -44,13 +45,17 @@ mcp = FastMCP(
         "For real gear use list_item_mods + create_rare affixes; fix_gaps closes resist and "
         "attribute gaps; trade_search and price_check use live market data; explain_stat, "
         "evaluate_scenarios and compare_builds help explain a build; plan_leveling makes "
-        "leveling trees; render_tree draws the tree. "
+        "leveling trees; render_tree draws the tree. Item sets and config sets keep alternatives "
+        "(budget gear, mapping vs boss); rank_anoints and create_cluster_jewel cover anoints and "
+        "cluster jewels; list_saved_builds / load_saved_build / watch_builds_folder work with "
+        "PoB's own Builds folder. "
         "All numbers come from Path of Building's own calculation engine."
     ),
 )
 
 engine: PobEngine | None = None
 _history: list[str] = []          # XML snapshots for undo
+_source: dict = {}                # {"path": Path, "mtime": float} when loaded from a saved build
 _MAX_HISTORY = 20
 
 
@@ -77,6 +82,9 @@ EditOp = Literal[
     # passive tree
     "allocate_node", "allocate_path", "deallocate_node", "set_mastery",
     "add_tree_spec", "switch_tree_spec", "rename_tree_spec", "delete_tree_spec",
+    "create_cluster_jewel", "anoint",
+    "add_item_set", "switch_item_set", "rename_item_set", "delete_item_set",
+    "add_config_set", "switch_config_set", "rename_config_set", "delete_config_set",
     # skills
     "create_socket_group", "delete_socket_group",
     "add_gem", "remove_gem", "replace_gem", "set_gem",
@@ -107,6 +115,14 @@ class Edit(BaseModel):
         "replace_gem: group + (old_gem or gem_index) + new_gem. set_gem: group + gem_index + "
         "level/quality/enabled. set_main_skill: group (+skill_part). "
         "set_group_enabled: group + enabled and/or include_in_full_dps. "
+        "CLUSTER JEWELS  create_cluster_jewel: socket (jewel socket id or 'Jewel <id>') + skill (enchant "
+        "name, e.g. 'Fire Damage'; see list_cluster_jewel_options) + optional size, passives, notables "
+        "(names), mods, item_level, name, allocate ('notables' default, 'all', 'none'). "
+        "ANOINT  anoint: node (anointable notable) + optional slot (default Amulet). "
+        "ITEM SETS  add_item_set: label (+copy=false for empty gear); switch/delete_item_set: set (index or "
+        "title); rename_item_set: label (+set). CONFIG SETS  add_config_set: label + optional values "
+        "({configVar: value}) and copy=false to start from defaults; switch/delete_config_set: set; "
+        "rename_config_set: label (+set). "
         "TREE SPECS  add_tree_spec: label (+copy=false for an empty tree); switch_tree_spec / "
         "delete_tree_spec: spec (index or title); rename_tree_spec: label (+spec). "
         "ITEMS  equip_unique: name + slot (+variant). create_rare: slot + base + EITHER affixes (exact "
@@ -132,6 +148,14 @@ class Edit(BaseModel):
     crafted: Optional[list[str]] = Field(None, description="One bench-crafted mod line")
     strict: Optional[bool] = Field(None, description="create_rare: reject mods that can't roll on the base")
     spec: Optional[str | int] = Field(None, description="Tree spec index or title")
+    set: Optional[str | int] = Field(None, description="Item set or config set index or title")
+    values: Optional[dict[str, Any]] = Field(None, description="add_config_set: config values {var: value}")
+    socket: Optional[str | int] = Field(None, description="create_cluster_jewel: jewel socket node id or 'Jewel <id>'")
+    size: Optional[Literal["Large", "Medium", "Small"]] = None
+    skill: Optional[str] = Field(None, description="Cluster jewel enchant, e.g. 'Fire Damage'")
+    passives: Optional[int] = Field(None, description="Cluster jewel passive count")
+    notables: Optional[list[str]] = Field(None, description="Cluster jewel notable names")
+    allocate: Optional[Literal["notables", "all", "none"]] = None
     copy_: Optional[bool] = Field(None, alias="copy", description="add_tree_spec: copy the current tree (default true)")
     implicits: Optional[list[str]] = Field(None, description="Implicit mod lines; omit to use the base's implicit")
     item_level: Optional[int] = None
@@ -178,6 +202,12 @@ def load_build(source: str, name: str | None = None) -> dict:
     """
     res = _engine().load_build(source, name)
     _history.clear()
+    _source.clear()
+    p = Path(os.path.expanduser(source.strip())) if len(source) < 1024 and not source.strip().startswith("<") else None
+    if p is not None and not p.is_absolute():
+        p = ORIG_CWD / p
+    if p is not None and p.suffix.lower() == ".xml" and p.is_file():
+        _source.update(path=p, mtime=p.stat().st_mtime)
     return res
 
 
@@ -771,30 +801,26 @@ def render_tree(highlight: list[str | int] | None = None, route_to: str | int | 
     return [note, Image(data=png, format="png")]
 
 
-def _default_builds_dir() -> Path:
-    if os.environ.get("POB_BUILDS_DIR"):
-        return Path(os.path.expanduser(os.environ["POB_BUILDS_DIR"]))
-    home = Path.home()
-    candidates = [home / "Documents" / "Path of Building" / "Builds",
-                  home / "OneDrive" / "Documents" / "Path of Building" / "Builds"]
-    for c in candidates:
-        if c.is_dir():
-            return c
-    return candidates[0]
-
-
 @mcp.tool()
-def save_to_pob(name: str, folder: str | None = None, overwrite: bool = False) -> dict:
+def save_to_pob(name: str | None = None, folder: str | None = None, overwrite: bool = False) -> dict:
     """Save the build into Path of Building's Builds folder so it appears in the PoB app's build
-    list. Default folder: Documents/Path of Building/Builds (set POB_BUILDS_DIR to change it)."""
+    list. Default folder: Documents/Path of Building/Builds (set POB_BUILDS_DIR to change it).
+    Without `name`, saves back to the file the build was loaded from (needs overwrite=true)."""
     xml = _call("export_xml")["xml"]
-    target_dir = Path(os.path.expanduser(folder)) if folder else _default_builds_dir()
-    safe = "".join(c for c in name if c not in '<>:"/\\|?*').strip() or "Build"
-    path = target_dir / f"{safe}.xml"
+    if name:
+        target_dir = Path(os.path.expanduser(folder)) if folder else library.default_builds_dir()
+        safe = "".join(c for c in name if c not in '<>:"/\\|?*').strip() or "Build"
+        path = target_dir / f"{safe}.xml"
+    elif _source.get("path"):
+        path = _source["path"]
+    else:
+        raise PobError("Pass a name (this build wasn't loaded from a saved file)")
     if path.exists() and not overwrite:
         raise PobError(f"{path} already exists; pass overwrite=true to replace it")
-    target_dir.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(xml, encoding="utf-8")
+    library.watcher.note_own_write(path)  # don't report our own save as a change
+    _source.update(path=path, mtime=path.stat().st_mtime)
     return {"saved_to": str(path), "note": "In PoB, open the Builds list (or press F5) to see it."}
 
 
@@ -818,6 +844,110 @@ def import_character(account: str | None = None, character: str | None = None, r
     res = _engine().call("import_character", {"character_json": text})
     _engine().loaded = True
     _history.clear()
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Tools: item sets, config sets, anoints, cluster jewels
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_item_sets() -> dict:
+    """The build's item sets (e.g. budget vs endgame gear), which one is active and how many
+    slots each fills. Manage them with add/switch/rename/delete_item_set edits."""
+    return _call("item_sets")
+
+
+@mcp.tool()
+def list_config_sets() -> dict:
+    """The build's configuration sets (e.g. mapping vs bossing assumptions) with their values,
+    and which one is active. Manage them with add/switch/rename/delete_config_set edits."""
+    return _call("config_sets")
+
+
+@mcp.tool()
+def rank_anoints(weights: dict[str, float] | None = None, slot: str = "Amulet",
+                 replace_current: bool = True, limit: int = 15) -> dict:
+    """Rank every anointable notable by its value on this build, using PoB's calculator, with
+    the oils needed. By default each is compared against the amulet without its current anoint,
+    i.e. what you'd get by re-anointing. `weights` default: main DPS + 0.5 x TotalEHP.
+    Apply with an anoint edit."""
+    return _call("rank_anoints", {"weights": weights, "slot": slot,
+                                  "replace_current": replace_current, "limit": limit})
+
+
+@mcp.tool()
+def list_cluster_jewel_options(size: Literal["Large", "Medium", "Small"] = "Large",
+                               skill: str | None = None, item_level: int = 84) -> dict:
+    """Cluster jewel options. Without `skill`: the enchants (small passive types) for that size,
+    with passive counts, sockets and the notable limit. With `skill` (e.g. "Fire Damage"): every
+    notable that can roll with it, whether it's a prefix or suffix, and its stats. Create one
+    with a create_cluster_jewel edit."""
+    return _call("cluster_jewel_options", {"size": size, "skill": skill, "item_level": item_level},
+                 need_build=False)
+
+
+# ---------------------------------------------------------------------------
+# Tools: the PoB Builds folder
+# ---------------------------------------------------------------------------
+
+def _builds_dir(folder: str | None) -> Path:
+    return Path(os.path.expanduser(folder)) if folder else library.default_builds_dir()
+
+
+@mcp.tool()
+def list_saved_builds(query: str | None = None, folder: str | None = None) -> dict:
+    """Builds saved in Path of Building's Builds folder (including subfolders), with class,
+    ascendancy, level and last-modified time. `query` filters by name or path."""
+    d = _builds_dir(folder)
+    builds = library.list_builds(d, query)
+    return {"folder": str(d), "count": len(builds), "builds": builds}
+
+
+@mcp.tool()
+def load_saved_build(name: str, folder: str | None = None) -> dict:
+    """Load a build from PoB's Builds folder by name (or relative path). save_to_pob without a
+    name then saves back to the same file."""
+    path = library.find_build(_builds_dir(folder), name)
+    return load_build(str(path))
+
+
+@mcp.tool()
+def watch_builds_folder(enabled: bool = True, folder: str | None = None) -> dict:
+    """Start (or stop) watching PoB's Builds folder for builds created, saved or deleted in the
+    PoB app. Changes are collected in the background; get them with get_build_folder_changes."""
+    if not enabled:
+        library.watcher.stop()
+        return {"watching": False}
+    d = _builds_dir(folder)
+    library.watcher.start(d)
+    return {"watching": True, "folder": str(d)}
+
+
+@mcp.tool()
+def get_build_folder_changes(reload_if_changed: bool = False) -> dict:
+    """Changes in the Builds folder since the last call (start watching first), and whether the
+    loaded build's own file was modified in PoB. With reload_if_changed=true the loaded build is
+    reloaded from its file and the stat changes are reported. Reloading discards unsaved edits
+    made here."""
+    events = library.watcher.take_events()
+    res: dict[str, Any] = {"watching": library.watcher.running, "changes": events}
+    src = _source.get("path")
+    if src is not None:
+        changed = src.exists() and src.stat().st_mtime != _source.get("mtime")
+        res["loadedFile"] = str(src)
+        res["loadedFileChanged"] = changed
+        if changed and reload_if_changed:
+            before = _call("summary")
+            load_build(str(src))
+            after = _call("summary")
+            diffs = {}
+            for k, a in before["stats"].items():
+                b = after["stats"].get(k)
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) > 1e-6:
+                    diffs[k] = {"before": a, "after": b, "change": round(b - a, 2)}
+            res["reloaded"] = True
+            res["statChanges"] = diffs
     return res
 
 

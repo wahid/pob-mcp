@@ -738,7 +738,7 @@ local function applyEdits(edits)
 end
 
 local function diff(before, after, keys)
-	local res = {}
+	local res = setmetatable({}, { __jsontype = "object" }) -- "{}" rather than "[]" when nothing changed
 	for _, k in ipairs(keys) do
 		local a, b = before[k], after[k]
 		if type(a) == "number" and type(b) == "number" then
@@ -1800,7 +1800,9 @@ end
 local KEY_TYPES = { Notable = true, Keystone = true, Socket = true, ClassStart = true }
 
 local function isMainTree(node)
-	return not node.ascendancyName and not node.isProxy and not node.expansionSkill
+	-- Includes passives added by socketed cluster jewels; excludes the placeholder
+	-- "proxy" nodes PoB keeps for empty cluster sockets
+	return not node.ascendancyName and not node.isProxy
 end
 
 -- "+10 to Strength", "+10 to Strength" -> "2x +10 to Strength"
@@ -2936,6 +2938,403 @@ function API.import_character(p)
 	end
 	rebuild()
 	return info()
+end
+
+-------------------------------------------------------------------------------
+-- Item sets and config sets
+-------------------------------------------------------------------------------
+
+local function findOrdered(orderList, sets, ref, what)
+	local idx = tonumber(ref)
+	if idx and orderList[idx] then return orderList[idx], idx end
+	for i, id in ipairs(orderList) do
+		local title = sets[id].title or ("Default")
+		if title:lower() == tostring(ref):lower() then return id, i end
+	end
+	error(("No %s '%s'"):format(what, tostring(ref)))
+end
+
+function API.item_sets()
+	local itemsTab = B().itemsTab
+	local res = {}
+	for i, id in ipairs(itemsTab.itemSetOrderList) do
+		local set = itemsTab.itemSets[id]
+		local equipped = 0
+		for slotName, s in pairs(set) do
+			if type(s) == "table" and s.selItemId and s.selItemId ~= 0 then equipped = equipped + 1 end
+		end
+		if id == itemsTab.activeItemSetId then
+			equipped = 0
+			for _, slot in pairs(itemsTab.slots) do
+				if not slot.nodeId and slot.selItemId ~= 0 then equipped = equipped + 1 end
+			end
+		end
+		res[#res + 1] = { index = i, title = set.title or "Default", active = id == itemsTab.activeItemSetId,
+			equippedSlots = equipped }
+	end
+	return { itemSets = res }
+end
+
+function EDIT.add_item_set(e, notes)
+	local itemsTab = B().itemsTab
+	local set = itemsTab:NewItemSet()
+	set.title = e.label or ("Item set " .. (#itemsTab.itemSetOrderList + 1))
+	if e.copy ~= false then
+		for slotName, slot in pairs(itemsTab.slots) do
+			if not slot.nodeId then set[slotName] = { selItemId = slot.selItemId, active = slot.active } end
+		end
+	end
+	table.insert(itemsTab.itemSetOrderList, set.id)
+	itemsTab:SetActiveItemSet(set.id)
+	itemsTab:AddUndoState()
+	notes[#notes + 1] = ("Added item set %d (%s)%s and made it active"):format(#itemsTab.itemSetOrderList, set.title,
+		e.copy ~= false and ", copied from the current gear" or ", empty")
+end
+
+function EDIT.switch_item_set(e, notes)
+	local itemsTab = B().itemsTab
+	local id, i = findOrdered(itemsTab.itemSetOrderList, itemsTab.itemSets, e.set, "item set")
+	itemsTab:SetActiveItemSet(id)
+	notes[#notes + 1] = ("Active item set: %d (%s)"):format(i, itemsTab.itemSets[id].title or "Default")
+end
+
+function EDIT.rename_item_set(e, notes)
+	local itemsTab = B().itemsTab
+	local id = e.set and findOrdered(itemsTab.itemSetOrderList, itemsTab.itemSets, e.set, "item set") or itemsTab.activeItemSetId
+	itemsTab.itemSets[id].title = e.label
+	notes[#notes + 1] = "Renamed item set to " .. tostring(e.label)
+end
+
+function EDIT.delete_item_set(e, notes)
+	local itemsTab = B().itemsTab
+	if #itemsTab.itemSetOrderList == 1 then error("Can't delete the only item set") end
+	local id, i = findOrdered(itemsTab.itemSetOrderList, itemsTab.itemSets, e.set, "item set")
+	table.remove(itemsTab.itemSetOrderList, i)
+	itemsTab.itemSets[id] = nil
+	if itemsTab.activeItemSetId == id then
+		itemsTab.activeItemSet = nil -- don't write the deleted set back
+		itemsTab:SetActiveItemSet(itemsTab.itemSetOrderList[1])
+	end
+	notes[#notes + 1] = "Deleted item set " .. i
+end
+
+function API.config_sets()
+	local configTab = B().configTab
+	local res = {}
+	for i, id in ipairs(configTab.configSetOrderList) do
+		local set = configTab.configSets[id]
+		local values = {}
+		for k, v in pairs(set.input) do
+			if v ~= nil and v ~= false and v ~= "" and k ~= "customMods" then values[k] = num(v) end
+		end
+		res[#res + 1] = { index = i, title = set.title or "Default", active = id == configTab.activeConfigSetId,
+			values = values }
+	end
+	return { configSets = res }
+end
+
+function EDIT.add_config_set(e, notes)
+	local configTab = B().configTab
+	local set = configTab:NewConfigSet(nil, e.label or ("Config " .. (#configTab.configSetOrderList + 1)))
+	if e.copy ~= false then
+		for k, v in pairs(configTab.input) do set.input[k] = v end
+		for k, v in pairs(configTab.placeholder) do set.placeholder[k] = v end
+	end
+	for k, v in pairs(e.values or {}) do
+		if v == json.null then v = nil end
+		set.input[k] = v
+	end
+	table.insert(configTab.configSetOrderList, set.id)
+	configTab:SetActiveConfigSet(set.id)
+	configTab:AddUndoState()
+	notes[#notes + 1] = ("Added config set %d (%s) and made it active"):format(#configTab.configSetOrderList, set.title)
+end
+
+function EDIT.switch_config_set(e, notes)
+	local configTab = B().configTab
+	local id, i = findOrdered(configTab.configSetOrderList, configTab.configSets, e.set, "config set")
+	configTab:SetActiveConfigSet(id)
+	notes[#notes + 1] = ("Active config set: %d (%s)"):format(i, configTab.configSets[id].title or "Default")
+end
+
+function EDIT.rename_config_set(e, notes)
+	local configTab = B().configTab
+	local id = e.set and findOrdered(configTab.configSetOrderList, configTab.configSets, e.set, "config set") or configTab.activeConfigSetId
+	configTab.configSets[id].title = e.label
+	notes[#notes + 1] = "Renamed config set to " .. tostring(e.label)
+end
+
+function EDIT.delete_config_set(e, notes)
+	local configTab = B().configTab
+	if #configTab.configSetOrderList == 1 then error("Can't delete the only config set") end
+	local id, i = findOrdered(configTab.configSetOrderList, configTab.configSets, e.set, "config set")
+	table.remove(configTab.configSetOrderList, i)
+	configTab.configSets[id] = nil
+	if configTab.activeConfigSetId == id then configTab:SetActiveConfigSet(configTab.configSetOrderList[1]) end
+	notes[#notes + 1] = "Deleted config set " .. i
+end
+
+-------------------------------------------------------------------------------
+-- Anoints
+-------------------------------------------------------------------------------
+
+local function anointsOn(item)
+	local res = {}
+	for _, list in ipairs({ item.enchantModLines or {}, item.implicitModLines or {}, item.explicitModLines or {} }) do
+		for _, ml in ipairs(list) do
+			local name = ml.line:match("^Allocates (.+)$")
+			if name then res[#res + 1] = name end
+		end
+	end
+	return res
+end
+
+local function withoutAnoints(item)
+	local copy = new("Item"):Item(item:BuildRaw())
+	for i = #copy.enchantModLines, 1, -1 do
+		if copy.enchantModLines[i].line:match("^Allocates ") then table.remove(copy.enchantModLines, i) end
+	end
+	copy:BuildAndParseRaw()
+	return copy
+end
+
+function API.rank_anoints(p)
+	local build = B()
+	local spec = build.spec
+	local itemsTab = build.itemsTab
+	local slotName = p.slot or "Amulet"
+	local slot = itemsTab.slots[slotName]
+	local item = slot and slot.selItemId ~= 0 and itemsTab.items[slot.selItemId] or nil
+	local weights = p.weights
+	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
+	local calcFunc = build.calcsTab:GetMiscCalculator()
+	local current = item and anointsOn(item) or {}
+	local baseOverride = {}
+	if item and #current > 0 and p.replace_current ~= false then
+		baseOverride = { repSlotName = slotName, repItem = withoutAnoints(item) }
+	end
+	local baseOut = calcFunc(baseOverride, weights.FullDPS ~= nil)
+	local bases = {}
+	for stat in pairs(weights) do bases[stat] = readStat(baseOut, stat) end
+	local results = {}
+	for _, node in pairs(spec.nodes) do
+		if node.recipe and #node.recipe > 0 and node.type == "Notable" and not node.alloc and not node.ascendancyName then
+			local override = { addNodes = { [node] = true } }
+			for k, v in pairs(baseOverride) do override[k] = v end
+			local out = calcFunc(override, weights.FullDPS ~= nil)
+			local score = weightedScore(weights, bases, out)
+			local changes = {}
+			for stat in pairs(weights) do
+				local a, b = readStat(out, stat), bases[stat]
+				if a and b then changes[stat] = { change = a - b, pct = b ~= 0 and (a - b) / math.abs(b) * 100 or nil } end
+			end
+			results[#results + 1] = { name = node.dn, oils = node.recipe, score = score, changes = changes, stats = node.sd }
+		end
+	end
+	table.sort(results, function(a, b) return a.score > b.score end)
+	local limit = p.limit or 15
+	while #results > limit do table.remove(results) end
+	return {
+		slot = slotName, item = item and item.name or nil, currentAnoints = current,
+		comparedAgainst = (#current > 0 and p.replace_current ~= false) and "the item without its current anoint" or "the current build",
+		weights = weights, results = results,
+		note = "Apply with an anoint edit. Notables you already have allocated are left out.",
+	}
+end
+
+function EDIT.anoint(e, notes)
+	local build = B()
+	local itemsTab = build.itemsTab
+	local slotName = e.slot or "Amulet"
+	local slot = itemsTab.slots[slotName]
+	local item = slot and slot.selItemId ~= 0 and itemsTab.items[slot.selItemId]
+	if not item then error("Nothing equipped in " .. slotName) end
+	local node = resolveNode(e.node)
+	if not node or not node.recipe or #node.recipe == 0 then error(tostring(e.node) .. " can't be anointed") end
+	if not (item.base.type == "Amulet" or item.canBeAnointed) or item.base.subType == "Talisman" then
+		error(slotName .. " item can't be anointed")
+	end
+	local newItem = withoutAnoints(item)
+	table.insert(newItem.enchantModLines, 1, { crafted = true, line = "Allocates " .. node.dn })
+	newItem:BuildAndParseRaw()
+	itemsTab:AddItem(newItem, true)
+	slot:SetSelItemId(newItem.id)
+	itemsTab:PopulateSlots()
+	itemsTab:AddUndoState()
+	notes[#notes + 1] = ("Anointed %s with %s (oils: %s)"):format(slotName, node.dn, table.concat(node.recipe, ", "))
+end
+
+-------------------------------------------------------------------------------
+-- Cluster jewels
+-------------------------------------------------------------------------------
+
+local CLUSTER_SOCKETS = { Large = 2, Medium = 1, Small = 0 }
+local CLUSTER_NOTABLE_LIMIT = { Large = 3, Medium = 2, Small = 1 }
+
+local function clusterJewelData(size)
+	local name = (size or "Large"):gsub("^%l", string.upper) .. " Cluster Jewel"
+	local jd = B().data.clusterJewels.jewels[name]
+	if not jd then error("Cluster jewel size must be Large, Medium or Small", 0) end
+	return name, jd
+end
+
+local function findClusterSkill(jd, ref)
+	local want = tostring(ref):lower()
+	for tag, sk in pairs(jd.skills) do
+		local enchant = table.concat(sk.enchant or {}, " "):lower()
+		if tag:lower() == want or sk.name:lower() == want or enchant:find(want, 1, true) then return tag, sk end
+	end
+end
+
+-- Notables a cluster jewel with this enchant can roll
+local function clusterNotables(skillTag, ilvl)
+	local res = {}
+	for modId, mod in pairs(B().data.itemMods.JewelCluster or {}) do
+		local name = mod[1] and mod[1]:match("^1 Added Passive Skill is (.+)$")
+		if name and (mod.level or 1) <= (ilvl or 84) then
+			for i, key in ipairs(mod.weightKey or {}) do
+				if key == skillTag then
+					if (mod.weightVal[i] or 0) > 0 then res[name] = { modId = modId, type = mod.type, level = mod.level } end
+					break
+				end
+			end
+		end
+	end
+	return res
+end
+
+function API.cluster_jewel_options(p)
+	local name, jd = clusterJewelData(p.size)
+	local tree = B().spec.tree
+	if not p.skill then
+		local skills = {}
+		for tag, sk in pairs(jd.skills) do
+			skills[#skills + 1] = { name = sk.name, tag = tag, enchant = sk.enchant and sk.enchant[1] }
+		end
+		table.sort(skills, function(a, b) return a.name < b.name end)
+		return { jewel = name, passives = { min = jd.minNodes, max = jd.maxNodes },
+			sockets = CLUSTER_SOCKETS[jd.size], maxNotables = CLUSTER_NOTABLE_LIMIT[jd.size], skills = skills }
+	end
+	local tag, sk = findClusterSkill(jd, p.skill)
+	if not tag then error("No " .. name .. " enchant matching '" .. tostring(p.skill) .. "'", 0) end
+	local list = {}
+	for nName, info in pairs(clusterNotables(tag, p.item_level)) do
+		local node = tree.clusterNodeMap and tree.clusterNodeMap[nName]
+		list[#list + 1] = { name = nName, affix = info.type, level = info.level, stats = node and node.sd or nil }
+	end
+	table.sort(list, function(a, b) return a.name < b.name end)
+	return { jewel = name, skill = sk.name, enchant = sk.enchant and sk.enchant[1], notables = list,
+		note = ("A %s can have up to %d notables (at most 2 prefix and 2 suffix notables)."):format(name,
+			CLUSTER_NOTABLE_LIMIT[jd.size]) }
+end
+
+-- Nodes a socketed cluster jewel added (PoB's own subgraph record), incl. its nested sockets
+local function clusterSubgraphNodes(socket)
+	local spec = B().spec
+	for _, sg in pairs(spec.subGraphs or {}) do
+		if sg.parentSocket and sg.parentSocket.id == socket.id then
+			local out = {}
+			for _, n in ipairs(sg.nodes or {}) do
+				if n.type ~= "Mastery" then out[#out + 1] = n end
+			end
+			return out
+		end
+	end
+	return {}
+end
+
+function EDIT.create_cluster_jewel(e, notes)
+	local build = B()
+	local spec = build.spec
+	local socket = resolveNode(tostring(e.socket or ""):gsub("^Jewel ", ""))
+	if not socket or not socket.expansionJewel then
+		error("Not a cluster jewel socket: " .. tostring(e.socket) .. " (use find_passive_nodes 'Jewel Socket'; "
+			.. "outer sockets take Large, Medium or Small jewels)")
+	end
+	local socketSize = socket.expansionJewel.size
+	local size = e.size or ({ [2] = "Large", [1] = "Medium", [0] = "Small" })[socketSize]
+	local name, jd = clusterJewelData(size)
+	if jd.sizeIndex > socketSize then error(("%s doesn't fit this socket"):format(name)) end
+	local tag, sk = findClusterSkill(jd, e.skill or "")
+	if not tag then error("No " .. name .. " enchant matching '" .. tostring(e.skill) .. "' (see list_cluster_jewel_options)") end
+	local ilvl = e.item_level or 84
+	local passives = e.passives or jd.minNodes
+	if passives < jd.minNodes or passives > jd.maxNodes then
+		error(("%s has %d-%d passives"):format(name, jd.minNodes, jd.maxNodes))
+	end
+	local allowed = clusterNotables(tag, ilvl)
+	local picked = e.notables or {}
+	if #picked > CLUSTER_NOTABLE_LIMIT[jd.size] then
+		error(("%s can have at most %d notables"):format(name, CLUSTER_NOTABLE_LIMIT[jd.size]))
+	end
+	local nPrefix, nSuffix = 0, 0
+	for _, nName in ipairs(picked) do
+		local found
+		for an, info in pairs(allowed) do
+			if an:lower() == tostring(nName):lower() then found = info nName = an break end
+		end
+		if not found then error(("%s can't roll on a %s with %s"):format(nName, name, sk.name)) end
+		if found.type == "Prefix" then nPrefix = nPrefix + 1 else nSuffix = nSuffix + 1 end
+	end
+	if nPrefix > 2 or nSuffix > 2 then error("Too many prefix or suffix notables (max 2 of each)") end
+
+	if not socket.alloc then
+		if not socket.path then error("Socket is not reachable") end
+		spec:AllocNode(socket)
+	end
+	local sockets = e.sockets or CLUSTER_SOCKETS[jd.size]
+	local lines = { "Rarity: RARE", e.name or "Crafted Cluster", name, "Item Level: " .. ilvl }
+	local implicit = { "{enchant}Adds " .. passives .. " Passive Skills" }
+	if sockets > 0 then
+		implicit[#implicit + 1] = ("{enchant}%d Added Passive Skill%s %s Jewel Socket%s"):format(sockets,
+			sockets == 1 and "" or "s", sockets == 1 and "is a" or "are", sockets == 1 and "" or "s")
+	end
+	for _, l in ipairs(sk.enchant or {}) do implicit[#implicit + 1] = "{enchant}" .. l end
+	lines[#lines + 1] = "Implicits: " .. #implicit
+	for _, l in ipairs(implicit) do lines[#lines + 1] = l end
+	for _, nName in ipairs(picked) do lines[#lines + 1] = "1 Added Passive Skill is " .. nName end
+	for _, l in ipairs(e.mods or {}) do lines[#lines + 1] = l end
+	local item = new("Item"):Item(table.concat(lines, "\n"))
+	if not item.clusterJewel then error("PoB did not recognise the cluster jewel") end
+	item:BuildModList()
+
+	local itemsTab = build.itemsTab
+	local slot = itemsTab.sockets[socket.id]
+	itemsTab:AddItem(item, true)
+	slot:SetSelItemId(item.id)
+	itemsTab:PopulateSlots()
+	itemsTab:AddUndoState()
+	rebuild()
+	spec = B().spec
+	socket = spec.nodes[socket.id]
+
+	-- Allocate the new passives
+	local mode = e.allocate or "notables"
+	local usedBefore = spec:CountAllocNodes()
+	if mode == "all" then
+		for _, n in ipairs(clusterSubgraphNodes(socket)) do
+			if not n.alloc then
+				n.alloc = true
+				spec.allocNodes[n.id] = n
+			end
+		end
+		spec:BuildAllDependsAndPaths()
+	elseif mode == "notables" then
+		-- cheapest first; paths change after each allocation
+		for _ = 1, 10 do
+			local best
+			for _, n in ipairs(clusterSubgraphNodes(socket)) do
+				if n.type == "Notable" and not n.alloc and n.path and (not best or #n.path < #best.path) then best = n end
+			end
+			if not best then break end
+			spec:AllocNode(best)
+		end
+	end
+	local count = spec:CountAllocNodes() - usedBefore
+	spec:AddUndoState()
+	notes[#notes + 1] = ("Socketed %s (%s, %d passives%s) in %s; %d passive point%s allocated"):format(name, sk.name,
+		passives, #picked > 0 and (": " .. table.concat(picked, ", ")) or "", "Jewel " .. socket.id, count,
+		count == 1 and "" or "s")
 end
 
 -------------------------------------------------------------------------------

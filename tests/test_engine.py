@@ -248,3 +248,61 @@ def test_import_character_json(engine):
     engine.loaded = True
     assert (info["className"], info["ascendancy"], info["level"]) == ("Templar", "Hierophant", 99)
     assert len(engine.call("items")["items"]) > 10
+
+
+# ---------------------------------------------------------------------------
+# Item sets, config sets, anoints, cluster jewels
+# ---------------------------------------------------------------------------
+
+def test_item_sets(occ):
+    edit(occ, {"op": "add_item_set", "label": "Budget"}, {"op": "unequip_slot", "slot": "Body Armour"})
+    sets = occ.call("item_sets")["itemSets"]
+    assert [s["title"] for s in sets] == ["Default", "Budget"] and sets[1]["active"]
+    budget_life = occ.call("summary")["stats"]["Life"]
+    edit(occ, {"op": "switch_item_set", "set": "Default"})
+    assert occ.call("summary")["stats"]["Life"] > budget_life
+    edit(occ, {"op": "delete_item_set", "set": "Budget"})
+    assert len(occ.call("item_sets")["itemSets"]) == 1
+
+
+def test_config_sets(occ):
+    boss = occ.call("summary")["stats"]["CombinedDPS"]
+    edit(occ, {"op": "add_config_set", "label": "Mapping", "values": {"enemyIsBoss": "None"}})
+    assert occ.call("summary")["stats"]["CombinedDPS"] > boss
+    edit(occ, {"op": "switch_config_set", "set": 1})
+    assert occ.call("summary")["stats"]["CombinedDPS"] == boss
+    titles = [s["title"] for s in occ.call("config_sets")["configSets"]]
+    assert titles == ["Default", "Mapping"]
+
+
+def test_anoints(occ):
+    res = occ.call("rank_anoints", {"limit": 3})
+    assert res["currentAnoints"] and res["results"]
+    best = res["results"][0]
+    assert best["oils"]
+    edit(occ, {"op": "anoint", "node": best["name"]})
+    amulet = next(i for i in occ.call("items")["items"] if i["slot"] == "Amulet")
+    assert f"Allocates {best['name']}" in amulet["raw"]
+    assert amulet["raw"].count("Allocates") == 1
+    with pytest.raises(PobError, match="can't be anointed"):
+        edit(occ, {"op": "anoint", "node": best["name"], "slot": "Ring 1"})
+
+
+def test_cluster_jewels(engine):
+    engine.call("new_build")
+    engine.loaded = True
+    edit(engine, {"op": "set_ascendancy", "ascendancy": "Elementalist"}, {"op": "set_level", "level": 95},
+         {"op": "create_socket_group", "set_main": True, "gems": ["Fireball"]})
+    opts = engine.call("cluster_jewel_options", {"size": "Large", "skill": "Fire Damage"})["notables"]
+    prefixes = [n["name"] for n in opts if n["affix"] == "Prefix"]
+    suffixes = [n["name"] for n in opts if n["affix"] == "Suffix"]
+    picks = prefixes[:2] + suffixes[:1]
+    with pytest.raises(PobError, match="max 2"):
+        edit(engine, {"op": "create_cluster_jewel", "socket": "Jewel 7960", "skill": "Fire Damage",
+                      "notables": prefixes[:3]})
+    edit(engine, {"op": "create_cluster_jewel", "socket": "Jewel 7960", "skill": "Fire Damage",
+                  "passives": 8, "notables": picks})
+    assert set(picks) <= set(engine.call("tree")["notables"])
+    with pytest.raises(PobError, match="can't roll"):
+        edit(engine, {"op": "create_cluster_jewel", "socket": "Jewel 7960", "skill": "Fire Damage",
+                      "notables": ["Heart of Oak"]})

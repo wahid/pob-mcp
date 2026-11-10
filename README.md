@@ -25,6 +25,7 @@ for the same build and config.
 | `evaluate_scenarios` | The build against mapping, pinnacle-boss and uber-boss setups (or your own config sets) in one call |
 | `compare_builds` | Diff the loaded build against another (stats, keystones, notables, gems, gear) |
 | `render_tree` | A picture of the passive tree with allocated nodes and an optional route highlighted |
+| `list_item_sets` / `list_config_sets` | The build's gear sets (e.g. budget vs endgame) and config sets (e.g. mapping vs bossing) |
 
 **Changing and optimising**
 
@@ -38,6 +39,7 @@ for the same build and config.
 | `fix_gaps` | Close resist and attribute gaps with valid suffixes in free slots on rare gear, then the cheapest tree nodes; preview or apply |
 | `trade_search` | A pathofexile.com trade search for upgrades in a slot: every mod that can roll there is weighted by its PoB-calculated value |
 | `price_check` | poe.ninja prices for uniques, or for everything unique the build wears |
+| `rank_anoints` | Every anointable notable ranked by its value on this build, with the oils needed |
 | `export_build` | Share code or XML, optionally saved to a file |
 | `save_to_pob` | Save into PoB's Builds folder so it shows up in the PoB app |
 
@@ -51,6 +53,7 @@ for the same build and config.
 | `search_uniques` | PoB's unique database by name, base, type or mod text |
 | `search_item_bases` | Item bases for crafting rares, with implicits and base stats |
 | `list_item_mods` | The mods that can actually roll on a base, with tiers and mod ids for `create_rare` |
+| `list_cluster_jewel_options` | Cluster jewel enchants per size, and the notables each can roll (prefix/suffix, stats) |
 | `find_passive_nodes` | Notables, keystones, jewel sockets and ascendancy nodes by name or stat text, with path cost |
 | `get_tree_map` | The passive tree as a condensed graph (notables, keystones, sockets and branch points, joined by chains of small passives with their stats); whole tree or a region |
 | `find_routes` | 2–3 distinct cheapest routes to a node, with `via` / `avoid`, what each route picks up, and PoB-calculated stat changes |
@@ -61,6 +64,18 @@ for the same build and config.
 | `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
 | `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |
 
+**Working with PoB's Builds folder**
+
+| Tool | What it does |
+|---|---|
+| `list_saved_builds` | Builds in PoB's Builds folder with class, ascendancy, level and last-modified time |
+| `load_saved_build` | Load one by name; `save_to_pob` without a name then saves back to it |
+| `watch_builds_folder` | Watch the folder for builds created, saved or deleted in the PoB app |
+| `get_build_folder_changes` | What changed since the last check; optionally reload the loaded build from its file and show the stat changes |
+
+Together these let you and the agent work on the same build: edit in PoB, save, and the agent
+picks the change up; or let the agent save and press F5 in PoB.
+
 ### Edit operations
 
 Used by `compare_changes` and `apply_changes`. Several edits can go in one call.
@@ -70,6 +85,10 @@ Used by `compare_changes` and `apply_changes`. Several edits can go in one call.
 | Character | `set_class`, `set_ascendancy`, `set_level` |
 | Passive tree | `allocate_node` (shortest path; works for ascendancy nodes and jewel sockets), `allocate_path` (exactly the listed nodes, e.g. a route from `find_routes`), `deallocate_node`, `set_mastery` |
 | Tree specs | `add_tree_spec`, `switch_tree_spec`, `rename_tree_spec`, `delete_tree_spec` |
+| Cluster jewels | `create_cluster_jewel` (socket, enchant, passive count, notables; validated against what can roll, then allocated) |
+| Anoints | `anoint` (any anointable notable on the amulet) |
+| Item sets | `add_item_set`, `switch_item_set`, `rename_item_set`, `delete_item_set` |
+| Config sets | `add_config_set` (with values), `switch_config_set`, `rename_config_set`, `delete_config_set` |
 | Skills | `create_socket_group`, `delete_socket_group`, `add_gem`, `remove_gem`, `replace_gem`, `set_gem`, `set_main_skill`, `set_group_enabled` |
 | Items | `equip_unique`, `create_rare` (exact `affixes` by mod id, always valid; or free-text `mods`, checked against the base's mod pool), `equip_item` (pasted item text), `unequip_slot` |
 | Config | `set_config`, `add_custom_mod` |
@@ -223,7 +242,7 @@ offline.
 
 ```
 pip install -e ".[test]"
-POB_PATH=/path/to/PathOfBuilding pytest            # offline tests (~40 s)
+POB_PATH=/path/to/PathOfBuilding pytest            # offline tests (~1 min)
 POB_PATH=/path/to/PathOfBuilding pytest -m online  # poe.ninja check
 ```
 
@@ -235,8 +254,8 @@ and weekly against the latest PoB, so a league update that breaks something show
 
 - PoE1 / PoB Community only (not PoB for PoE2).
 - No character import from the PoE website (load a build code or XML instead).
-- Cluster jewel notables and timeless-jewel seeds can't be edited with the edit ops; edit
-  them in PoB, or use `add_custom_mod` to approximate a stat.
+- Timeless jewel seeds can't be set with the edit ops; edit them in PoB or paste the jewel
+  with `equip_item`.
 - `create_rare` with free-text `mods` only warns about mods that can't roll (or errors with
   `strict`); use `affixes` for guaranteed-valid items. Influence, veiled, fractured and essence
   mods aren't in the pool; one bench craft can be added with `crafted`.

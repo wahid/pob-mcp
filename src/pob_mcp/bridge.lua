@@ -554,7 +554,7 @@ end
 local function getGroup(idx)
 	local skillsTab = B().skillsTab
 	local group = skillsTab.socketGroupList[tonumber(idx) or -1]
-	if not group then error("No socket group with index " .. tostring(idx) .. " (see get_skills)") end
+	if not group then error("No socket group with index " .. tostring(idx) .. " (see get_skills)", 0) end
 	return group
 end
 
@@ -728,6 +728,284 @@ function API.compare_edits(p)
 	frame()
 	if not ok then error(notesOrErr, 0) end
 	return { notes = notesOrErr, changes = diff(before, after, keys) }
+end
+
+-------------------------------------------------------------------------------
+-- Optimisation: passive ranking, support gem ranking, warnings
+-------------------------------------------------------------------------------
+
+-- Reads a stat from an output table; "Minion.CombinedDPS" style paths allowed.
+local function readStat(out, stat)
+	local v = out
+	for part in stat:gmatch("[^%.]+") do
+		if type(v) ~= "table" then return nil end
+		v = v[part]
+	end
+	if type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge then return v end
+	return nil
+end
+
+local function usesFullDPS()
+	for _, group in ipairs(B().skillsTab.socketGroupList) do
+		if group.includeInFullDPS and group.enabled ~= false then return true end
+	end
+	return false
+end
+
+-- Picks the stat to optimise when the caller doesn't name one.
+local function defaultMetric()
+	local out = output()
+	if usesFullDPS() and (out.FullDPS or 0) > 0 then return "FullDPS" end
+	if out.Minion and (readStat(out, "Minion.CombinedDPS") or 0) > 0 then return "Minion.CombinedDPS" end
+	return "CombinedDPS"
+end
+
+local function metricInfo(p)
+	local metric = (p.metric and p.metric ~= "") and p.metric or defaultMetric()
+	local useFull = metric == "FullDPS"
+	local calcFunc, base = B().calcsTab:GetMiscCalculator()
+	local baseVal = readStat(base, metric)
+	if baseVal == nil then
+		error(("Unknown or non-numeric stat '%s' (see get_stats for names; minion stats use 'Minion.<Stat>')"):format(metric), 0)
+	end
+	return metric, useFull, calcFunc, baseVal
+end
+
+local function gainEntry(entry, val, baseVal)
+	entry.value = val
+	entry.gain = val and (val - baseVal) or nil
+	entry.pct = (val and baseVal ~= 0) and ((val - baseVal) / math.abs(baseVal) * 100) or nil
+	return entry
+end
+
+function API.rank_passives(p)
+	local build = B()
+	local spec = build.spec
+	local metric, useFull, calcFunc, baseVal = metricInfo(p)
+	local mode = p.mode or "add"
+	local maxCost = p.max_path_cost or 8
+	local limit = p.limit or 15
+	local granted = build.calcsTab.mainEnv.grantedPassives or {}
+	local results = {}
+	local evaluated = 0
+	local cache = {}
+
+	local function wanted(node)
+		if not node.dn or node.modKey == "" or granted[node.id] then return false end
+		if node.type == "Mastery" or node.type == "ClassStart" or node.type == "AscendClassStart" or node.isAscendancyStart then
+			return false
+		end
+		if node.ascendancyName then
+			return p.include_ascendancy and node.ascendancyName == spec.curAscendClassName
+		end
+		if node.type == "Normal" then return p.include_small or false end
+		return node.type == "Notable" or node.type == "Keystone"
+	end
+
+	if mode == "add" then
+		for _, node in pairs(spec.nodes) do
+			if not node.alloc and node.path and #node.path > 0 and #node.path <= maxCost and wanted(node) then
+				-- Single-node value (cached by identical mods), then the full path
+				local key = node.modKey
+				if not cache[key] then
+					cache[key] = readStat(calcFunc({ addNodes = { [node] = true } }, useFull), metric)
+					evaluated = evaluated + 1
+				end
+				local nodeVal = cache[key]
+				local pathVal = nodeVal
+				local cost = #node.path
+				if cost > 1 then
+					local set = {}
+					for _, pn in ipairs(node.path) do set[pn] = true end
+					pathVal = readStat(calcFunc({ addNodes = set }, useFull), metric)
+					evaluated = evaluated + 1
+				end
+				local e = gainEntry({ id = node.id, name = node.dn, type = node.type, cost = cost,
+					ascendancy = node.ascendancyName, stats = node.sd }, pathVal, baseVal)
+				e.nodeOnlyGain = nodeVal and (nodeVal - baseVal) or nil
+				e.gainPerPoint = e.gain and e.gain / cost or nil
+				results[#results + 1] = e
+			end
+		end
+		local sortKey = p.sort == "total" and "gain" or "gainPerPoint"
+		table.sort(results, function(a, b) return (a[sortKey] or -math.huge) > (b[sortKey] or -math.huge) end)
+	elseif mode == "remove" then
+		for _, node in pairs(spec.allocNodes) do
+			if wanted(node) then
+				local set, n = {}, 0
+				for _, dn in ipairs(node.depends or { node }) do set[dn] = true n = n + 1 end
+				local val = readStat(calcFunc({ removeNodes = set }, useFull), metric)
+				evaluated = evaluated + 1
+				local e = gainEntry({ id = node.id, name = node.dn, type = node.type, pointsRefunded = n,
+					ascendancy = node.ascendancyName, stats = node.sd }, val, baseVal)
+				e.lossPerPoint = e.gain and (-e.gain / math.max(n, 1)) or nil
+				results[#results + 1] = e
+			end
+		end
+		-- Least valuable first: smallest loss per refunded point
+		table.sort(results, function(a, b)
+			local la, lb = a.lossPerPoint or math.huge, b.lossPerPoint or math.huge
+			if la ~= lb then return la < lb end
+			return (a.pointsRefunded or 0) > (b.pointsRefunded or 0)
+		end)
+	else
+		error("mode must be 'add' or 'remove'", 0)
+	end
+
+	local total = #results
+	while #results > limit do table.remove(results) end
+	return { metric = metric, base = baseVal, mode = mode, candidates = total,
+		calculations = evaluated, results = results }
+end
+
+function API.rank_support_gems(p)
+	local build = B()
+	local skillsTab = build.skillsTab
+	local group = getGroup(p.group or build.mainSocketGroup)
+	local metric, useFull, calcFunc, baseVal = metricInfo(p)
+	local limit = p.limit or 15
+	local gemList = group.gemList
+
+	-- Supports that can affect the group's active skills (same test PoB's gem picker uses)
+	local skills = group.displaySkillList or {}
+	if not skills[1] then error("Socket group has no active skill to support", 0) end
+	local replaceIdx = tonumber(p.replace_gem_index)
+	if replaceIdx and not gemList[replaceIdx] then error("No gem at index " .. replaceIdx, 0) end
+
+	-- Effects already in the link (incl. awakened/normal pairs), except the one being replaced
+	local inGroup = {}
+	for i, g in ipairs(gemList) do
+		if g.gemData and i ~= replaceIdx then
+			local ge = g.gemData.grantedEffect
+			inGroup[ge.id] = true
+			if ge.plusVersionOf then inGroup[ge.plusVersionOf] = true end
+		end
+	end
+	local slotIdx = replaceIdx or (#gemList + 1)
+	local saved = gemList[slotIdx] and copyTable(gemList[slotIdx], true)
+
+	local results, checked = {}, 0
+	for gemId, gemData in pairs(build.data.gems) do
+		local ge = gemData.grantedEffect
+		local exceptional = (ge.plusVersionOf ~= nil) or (gemData.tagString or ""):match("Exceptional") ~= nil
+		local isTrigger = (gemData.tagString or ""):lower():find("trigger", 1, true) ~= nil
+			or (gemData.name:match("^Cast ") ~= nil)
+		if ge.support and not ge.legacy and not inGroup[ge.id]
+			and not (ge.plusVersionOf and inGroup[ge.plusVersionOf])
+			and (p.include_exceptional ~= false or not exceptional)
+			and (p.include_triggers or not isTrigger) then
+			local ok = false
+			for _, s in ipairs(skills) do
+				if calcLib.canGrantedEffectSupportActiveSkill(ge, s) then ok = true break end
+			end
+			if ok then
+				local level = skillsTab:ProcessGemLevel(gemData)
+				gemList[slotIdx] = {
+					level = level, quality = p.quality or 20, qualityId = "Default", count = 1,
+					enabled = true, enableGlobal1 = true, enableGlobal2 = true,
+					gemId = gemId, nameSpec = gemData.name, skillId = gemData.grantedEffectId,
+					gemData = gemData,
+				}
+				local okCalc, out = pcall(calcFunc, nil, useFull)
+				checked = checked + 1
+				if okCalc then
+					results[#results + 1] = gainEntry({ name = gemData.name, level = level,
+						exceptional = exceptional }, readStat(out, metric), baseVal)
+				end
+			end
+		end
+	end
+	-- Restore the group
+	gemList[slotIdx] = saved
+	if saved == nil then gemList[slotIdx] = nil end
+	skillsTab:ProcessSocketGroup(group)
+
+	table.sort(results, function(a, b) return (a.value or -math.huge) > (b.value or -math.huge) end)
+
+	-- How much each current support contributes (value lost if disabled)
+	local current = {}
+	if p.include_current ~= false then
+		for i, g in ipairs(gemList) do
+			if g.gemData and g.gemData.grantedEffect.support and g.enabled ~= false then
+				g.enabled = false
+				local okCalc, out = pcall(calcFunc, nil, useFull)
+				g.enabled = true
+				if okCalc then
+					local v = readStat(out, metric)
+					current[#current + 1] = { index = i, name = g.gemData.name,
+						contribution = v and (baseVal - v) or nil,
+						pct = (v and v ~= 0) and ((baseVal - v) / math.abs(v) * 100) or nil }
+				end
+			end
+		end
+		table.sort(current, function(a, b) return (a.contribution or 0) < (b.contribution or 0) end)
+		skillsTab:ProcessSocketGroup(group)
+	end
+
+	local total = #results
+	while #results > limit do table.remove(results) end
+	return {
+		metric = metric, base = baseVal, group = p.group or build.mainSocketGroup,
+		label = socketGroupLabel(group),
+		mode = replaceIdx and ("replace gem " .. replaceIdx .. " (" .. tostring(saved and saved.nameSpec) .. ")") or "add to group",
+		candidates = total, results = results, currentSupports = current,
+	}
+end
+
+function API.warnings()
+	local build = B()
+	local out = output()
+	local res = {}
+	local seen = {}
+	local function add(kind, msg)
+		msg = cleanText(msg)
+		if not seen[msg] then
+			seen[msg] = true
+			res[#res + 1] = { kind = kind, message = msg }
+		end
+	end
+
+	-- PoB's own sidebar warnings
+	if build.RefreshStatList then pcall(build.RefreshStatList, build) end
+	for _, line in ipairs(build.controls and build.controls.warnings and build.controls.warnings.lines or {}) do
+		add("pob", line)
+	end
+
+	-- Extra checks
+	for _, elem in ipairs({ "Fire", "Cold", "Lightning" }) do
+		local r, max = out[elem .. "Resist"], out[elem .. "ResistMax"] or 75
+		if type(r) == "number" and r < max then
+			add("resist", ("%s resistance is %d%% (cap %d%%)"):format(elem, r, max))
+		end
+	end
+	if type(out.ChaosResist) == "number" and out.ChaosResist < 0 then
+		add("resist", ("Chaos resistance is negative (%d%%)"):format(out.ChaosResist))
+	end
+	for _, attr in ipairs({ "Str", "Dex", "Int" }) do
+		local have, need = out[attr], out["Req" .. attr]
+		if type(have) == "number" and type(need) == "number" and need > have then
+			add("requirement", ("%s requirement not met: need %d, have %d"):format(attr, need, have))
+		end
+	end
+	for _, pool in ipairs({ "Life", "Mana" }) do
+		local unres = out[pool .. "Unreserved"]
+		if type(unres) == "number" and unres < 0 then
+			add("reservation", ("%s is over-reserved (%d unreserved)"):format(pool, unres))
+		end
+	end
+	for _, group in ipairs(build.skillsTab.socketGroupList) do
+		for _, g in ipairs(group.gemList or {}) do
+			if g.errMsg then
+				add("gem", ("Group %s: %s"):format(socketGroupLabel(group), g.errMsg))
+			end
+		end
+	end
+	local env = build.calcsTab.mainEnv
+	local skill = env and env.player and env.player.mainSkill
+	if skill and skill.infoMessage then add("skill", skill.infoMessage) end
+	if skill and skill.disableReason then add("skill", "Main skill disabled: " .. skill.disableReason) end
+
+	return { count = #res, warnings = res }
 end
 
 -------------------------------------------------------------------------------

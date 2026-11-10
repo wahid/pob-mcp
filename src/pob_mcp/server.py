@@ -271,6 +271,80 @@ def undo_last_change() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tools: optimisation
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def rank_passives(
+    metric: str | None = None,
+    mode: Literal["add", "remove"] = "add",
+    max_path_cost: int = 8,
+    sort: Literal["per_point", "total"] = "per_point",
+    include_small: bool = False,
+    include_ascendancy: bool = False,
+    limit: int = 15,
+) -> dict:
+    """Rank passive nodes by how much they change a stat, using PoB's calculator.
+
+    mode="add": every unallocated notable/keystone within `max_path_cost` points is
+    evaluated with its whole path (so travel nodes count). Results are sorted by gain per
+    point (or total gain with sort="total"). `nodeOnlyGain` is the node by itself.
+
+    mode="remove": every allocated notable/keystone is removed along with the nodes that
+    depend on it; sorted from least valuable per refunded point. Good for finding respec
+    candidates. Run once per metric you care about (e.g. DPS, then TotalEHP).
+
+    `metric` is any stat name from get_stats (e.g. "TotalEHP", "Life", "TotalDotDPS",
+    "Minion.CombinedDPS"). Default: FullDPS if the build uses Full DPS, else the main
+    skill's CombinedDPS (minion DPS for minion builds).
+    """
+    return _call("rank_passives", {
+        "metric": metric, "mode": mode, "max_path_cost": max_path_cost,
+        "sort": "total" if sort == "total" else "per_point",
+        "include_small": include_small, "include_ascendancy": include_ascendancy, "limit": limit,
+    })
+
+
+@mcp.tool()
+def rank_support_gems(
+    group: int | None = None,
+    replace_gem_index: int | None = None,
+    metric: str | None = None,
+    include_exceptional: bool = True,
+    include_triggers: bool = False,
+    include_current: bool = True,
+    quality: int = 20,
+    limit: int = 15,
+) -> dict:
+    """Rank every support gem that can support a socket group's skill (the same
+    compatibility check PoB's gem picker uses).
+
+    By default each support is tried as an extra gem in the group (default: the main skill
+    group). Pass `replace_gem_index` (from get_skills) to rank replacements for that gem
+    instead, which is what you want for a full link. `currentSupports` shows how much each
+    support already in the group contributes (its loss if disabled), weakest first.
+
+    Exceptional (awakened etc.) gems are included unless include_exceptional=false.
+    Trigger supports (Cast when..., Cast on...) are excluded by default because they change
+    how the skill is used and their DPS numbers are misleading.
+    """
+    return _call("rank_support_gems", {
+        "group": group, "replace_gem_index": replace_gem_index, "metric": metric,
+        "include_exceptional": include_exceptional, "include_triggers": include_triggers,
+        "include_current": include_current, "quality": quality, "limit": limit,
+    })
+
+
+@mcp.tool()
+def get_warnings() -> dict:
+    """Problems with the build: PoB's own sidebar warnings (e.g. too many points, cost
+    exceeding pool, jewel limits, missing anoints) plus uncapped elemental resists,
+    negative chaos resist, unmet attribute requirements, over-reservation, gem errors and
+    a disabled main skill."""
+    return _call("warnings")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

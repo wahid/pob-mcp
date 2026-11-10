@@ -25,6 +25,9 @@ for the same build and config.
 | `apply_changes` | Apply edits and keep them |
 | `undo_last_change` | Roll back the last `apply_changes` |
 | `export_build` | Share code or XML, optionally saved to a file |
+| `rank_passives` | Rank reachable notables/keystones by gain per point (or allocated ones by least value, for respecs) for any stat |
+| `rank_support_gems` | Rank every compatible support gem for a link, as an extra gem or as a replacement, plus what each current support contributes |
+| `get_warnings` | PoB's own warnings plus uncapped resists, unmet requirements, over-reservation, gem errors |
 
 Edit operations (used by `compare_changes` / `apply_changes`):
 `allocate_node`, `deallocate_node`, `equip_item`, `unequip_slot`, `add_gem`, `remove_gem`,
@@ -46,6 +49,9 @@ Edit operations (used by `compare_changes` / `apply_changes`):
    ```
    pip install ./pob-mcp
    ```
+
+   For development, use `pip install -e ./pob-mcp` so code changes take effect without
+   reinstalling.
 
    This pulls in `mcp` and `lupa`. `lupa` ships its own LuaJIT, so there's nothing else to
    install — no system Lua, no luarocks.
@@ -72,6 +78,10 @@ server looks in `~/PathOfBuilding`.
 ## Example prompts
 
 - "Load https://pobb.in/xxxx and tell me my weakest defensive layer."
+- "What are the best 5 notables for my next points, by DPS per point? And for EHP?"
+- "Which support in my main 6-link is weakest, and what should replace it?"
+- "I need 10 points for a respec. Which notables cost me the least damage?"
+- "Is anything wrong with this build?"
 - "Which of these three notables gives the most DPS per point: …?"
 - "Compare my current ring with this one: (pasted item text)."
 - "Swap Controlled Destruction for Elemental Focus in my main link and show the difference against a Pinnacle boss."
@@ -92,6 +102,9 @@ MCP client ⇄ stdio ⇄ server.py (FastMCP/MCPServer)
 - The first call takes ~5 seconds while PoB loads its data (the server starts this in the
   background as soon as it launches). After that, calls are fast; a what-if comparison
   takes well under a second.
+- `rank_passives` and `rank_support_gems` use PoB's internal "misc calculator", the same
+  fast path behind its node power heatmap and its gem-list DPS sort. Ranking every notable
+  within 8 points takes a few seconds; ranking supports takes under a second.
 - `compare_changes` snapshots the build as XML, applies the edits, recalculates, diffs the
   stats and reloads the snapshot, so the loaded build is never changed.
 - Stats depend on the build's Configuration tab (enemy type, conditions, charges…). Use

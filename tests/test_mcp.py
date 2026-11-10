@@ -56,3 +56,13 @@ def test_price_check_online():
     from pob_mcp import online
     res = online.unique_prices(["Tabula Rasa"])
     assert res["prices"] and res["prices"][0]["chaos"] is not None
+
+
+@pytest.mark.online
+def test_popular_builds_online():
+    from pob_mcp import online
+    res = online.build_stats(skill="Lightning Arrow", top=5)
+    assert res["characters"] > 0 and res["mainSkills"][0]["name"] == "Lightning Arrow"
+    assert all(not u["name"].startswith(("Rare ", "Magic ")) for u in res["uniques"])
+    with pytest.raises(Exception, match="Did you mean"):
+        online.build_stats(skill="Lightning Arow")

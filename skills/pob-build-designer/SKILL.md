@@ -76,7 +76,11 @@ hit and DoT scaling, stacking many unrelated uniques, mechanics that need setup 
 character cannot sustain.
 
 Use `search_gems` for the skill's tags and base stats, `search_uniques` for build-enabling
-items, `list_keystones` for keystones that change the rules. Sketch two or three
+items, `list_keystones` for keystones that change the rules. `popular_builds(ascendancy,
+skill)` shows what this league's ladder players of that skill or ascendancy rely on
+(keystones, uniques, anoints, masteries, gems); use it as a sanity check and a source of
+ideas, not as a template. The ladder favours strong, expensive builds, and a build that
+only works with the same mirror-tier uniques is not a fit for a modest budget. Sketch two or three
 candidate concepts in a sentence each when the brief is open, pick one and say why.
 
 ### 3. Skeleton in PoB
@@ -92,7 +96,9 @@ candidate concepts in a sentence each when the brief is open, pick one and say w
    large share of reserved life. Supports or effects that move reservation onto life
    shrink the pool that max hit and EHP use; only do that on purpose (low-life builds).
 4. Set **realistic configuration** before reading any DPS: `list_config_options`,
-   then `set_config`. Use config sets (`add_config_set`) for "Mapping" and "Boss".
+   then `set_config`. Use config sets (`add_config_set`) for "Mapping" and "Boss", and
+   set `enemyIsBoss` explicitly in each ("None" for mapping, "Pinnacle" or "Uber" for
+   bosses): PoB's own default may already be a boss.
    Only enable conditions the build actually maintains: charges it really generates,
    buffs it really has up, enemy conditions it really applies.
 
@@ -105,7 +111,9 @@ Equip what a player at the target budget would really own (gear-and-progression.
   together is a fantasy item; do not use one to make a build look good.
 - Base names must match PoB's (some carry a suffix, such as hybrid boots); look them
   up with `search_item_bases` before `create_rare`.
-- Flasks: a life flask plus utility flasks (movement, defense, immunity suffixes).
+- Flasks: a life flask plus utility flasks (movement, defense, immunity suffixes), made
+  with `create_flask` from `list_item_mods(base="Jade Flask")`-style mod ids. Equipped
+  flasks are switched on; turn off any the build cannot keep up with `set_flask_active`.
   Without flasks PoB shows lower defense and damage than the real character has.
 - Resistances: cap fire/cold/lightning at 75% (PoB already applies the post-campaign
   resistance penalty by default) mostly from gear, so the tree can go to damage and
@@ -119,12 +127,23 @@ Equip what a player at the target budget would really own (gear-and-progression.
    that are useful on the way.
 3. `auto_allocate_passives(weights=...)` to fill remaining points toward a weighted
    goal (for example main DPS plus TotalEHP plus Life), with `avoid` for anything
-   you rejected. The optimiser is greedy and follows the weights literally; when the
-   damage weight dominates it leaves defense short, so check step 6 afterwards and
-   rerun with more weight on Life/TotalEHP if needed.
-4. `list_mastery_effects` and `set_mastery` for each allocated mastery.
-5. `fix_gaps` to repair attributes and resists cheaply, then `get_warnings`.
-6. `rank_passives(mode="remove")` to find dead weight; `rank_passives(mode="add")`
+   you rejected. The optimiser is greedy and follows the weights literally, so give it
+   the defense benchmarks as `targets` (for example `{"PhysicalMaximumHitTaken": 10000,
+   "LightningMaximumHitTaken": 30000}` for T16 mapping): it closes those gaps first,
+   then spends the rest on the weights without breaking them. If it reports a target
+   it could not reach, the gap has to come from gear, flasks, gems or config.
+   Targets cost damage. When the defense targets eat most of the tree, run the optimiser
+   on fresh tree specs (`add_tree_spec` with `copy: false`; check `ascendancyPointsUsed`
+   afterwards and re-allocate the ascendancy if needed) at two or three target levels
+   and compare: that trade-off curve tells you, and the user, whether the gear and budget
+   can support both goals. If even zero targets leave DPS short of the benchmark, the gear
+   or the concept is the bottleneck, not the tree; say so and name the upgrades that move it.
+4. Jewel sockets on the tree become item slots named `Jewel <node id>` once allocated
+   (`list_item_slots` lists them). An empty socket is wasted points; rare jewels with life
+   and the build's damage or crit mods are cheap and standard on most builds.
+5. `list_mastery_effects` and `set_mastery` for each allocated mastery.
+6. `fix_gaps` to repair attributes and resists cheaply, then `get_warnings`.
+7. `rank_passives(mode="remove")` to find dead weight; `rank_passives(mode="add")`
    per metric to find what to take instead. `rank_anoints` for the amulet.
 
 ### 6. Defense pass (do not skip)
@@ -144,8 +163,8 @@ usually performs worse than one with balanced layers.
 ### 7. Damage pass
 
 With defenses in place, raise damage: `explain_stat` on the main damage type (for
-example `"Lightning"`) shows base damage, added damage and the total after increased,
-more and enemy resistance; `"AverageHit"` shows the crit split and `"Speed"` the rate.
+example `"Lightning"`) shows base and added damage, the increased and more multipliers
+for each source damage type (including conversion), and the enemy-resistance multiplier; `"AverageHit"` shows the crit split and `"Speed"` the rate.
 Find the bucket that is lowest relative to its potential and invest there. Re-run `rank_support_gems` and `rank_passives` after big changes;
 rankings shift as buckets fill.
 

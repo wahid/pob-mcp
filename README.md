@@ -21,7 +21,7 @@ for the same build and config.
 | `get_passive_tree` | Keystones, notables, masteries, ascendancy nodes, tree URL |
 | `get_config` / `list_config_options` | Current Configuration tab values / all options and choices |
 | `get_warnings` | PoB's own warnings plus uncapped resists, unmet requirements, over-reservation, point overspend, gem errors |
-| `explain_stat` | Where a stat comes from: PoB's breakdown plus every modifier source (tree node, item, gem) with its value |
+| `explain_stat` | Where a stat comes from: PoB's breakdown plus every modifier source (tree node, item, gem) with its value. Pass a damage type ("Lightning") for base, added, increased and more per source type, conversion and enemy resistance |
 | `evaluate_scenarios` | The build against mapping, pinnacle-boss and uber-boss setups (or your own config sets) in one call |
 | `compare_builds` | Diff the loaded build against another (stats, keystones, notables, gems, gear) |
 | `render_tree` | A picture of the passive tree with allocated nodes and an optional route highlighted |
@@ -39,6 +39,7 @@ for the same build and config.
 | `fix_gaps` | Close resist and attribute gaps with valid suffixes in free slots on rare gear, then the cheapest tree nodes; preview or apply |
 | `trade_search` | A pathofexile.com trade search for upgrades in a slot: every mod that can roll there is weighted by its PoB-calculated value |
 | `price_check` | poe.ninja prices for uniques, or for everything unique the build wears |
+| `popular_builds` | What ladder players run (poe.ninja): share of characters using each ascendancy, main skill, keystone, unique, anoint, mastery and gem, filtered by ascendancy and/or skill |
 | `rank_anoints` | Every anointable notable ranked by its value on this build, with the oils needed |
 | `list_ascendancy_notables` | Every ascendancy's notables (or one) with exact stats, read live from PoB |
 | `list_keystones` | All keystones with their stats, allocation and path cost |
@@ -61,7 +62,7 @@ for the same build and config.
 | `find_routes` | 2–3 distinct cheapest routes to a node, with `via` / `avoid`, what each route picks up, and PoB-calculated stat changes |
 | `list_mastery_effects` | Mastery options, for one mastery or every one you can allocate now |
 | `list_item_slots` | Gear slots plus allocated tree jewel sockets |
-| `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}` |
+| `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards |
 | `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree, most valuable nodes first |
 | `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
 | `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |
@@ -92,7 +93,7 @@ Used by `compare_changes` and `apply_changes`. Several edits can go in one call.
 | Item sets | `add_item_set`, `switch_item_set`, `rename_item_set`, `delete_item_set` |
 | Config sets | `add_config_set` (with values), `switch_config_set`, `rename_config_set`, `delete_config_set` |
 | Skills | `create_socket_group`, `delete_socket_group`, `add_gem`, `remove_gem`, `replace_gem`, `set_gem`, `set_main_skill`, `set_group_enabled` |
-| Items | `equip_unique`, `create_rare` (exact `affixes` by mod id, always valid; or free-text `mods`, checked against the base's mod pool), `equip_item` (pasted item text), `unequip_slot` |
+| Items | `equip_unique`, `create_rare` (exact `affixes` by mod id, always valid; or free-text `mods`, checked against the base's mod pool), `create_flask` (magic flask from mod ids, switched on), `set_flask_active`, `equip_item` (pasted item text), `unequip_slot` |
 | Config | `set_config`, `add_custom_mod` |
 
 Gem names work with or without the "Support" suffix.
@@ -228,7 +229,7 @@ seconds; if it reaches its time limit, the progress is kept and calling it again
 
 ### Online features
 
-`trade_search`, `price_check` and `import_character` use the internet; everything else runs
+`trade_search`, `price_check`, `popular_builds` and `import_character` use the internet; everything else runs
 offline.
 
 - **Prices** come from [poe.ninja](https://poe.ninja/docs/api). Responses are cached for 15
@@ -250,6 +251,11 @@ tools above step by step and reads game data live (`list_ascendancy_notables`,
 paraphrased from r/PathOfExileBuilds and r/pathofexile threads listed in
 `references/sources.md`.
 
+The server also serves the guide itself, so any MCP client can use it: the
+`read_build_guide` tool returns `SKILL.md` or one reference section, the `design_build` and
+`review_build` prompts start a session with the method loaded, and each section is a
+`pob-guide://<section>` resource. Set `POB_MCP_GUIDE=0` to switch this off.
+
 Install it in Claude Code by copying the folder to `~/.claude/skills/` (or a project's
 `.claude/skills/`), or upload the packaged `pob-build-designer.skill` in the Claude app
 under Settings → Capabilities → Skills. `evals/` holds two test briefs.
@@ -267,6 +273,10 @@ test that starts the real server over stdio. `.github/workflows/test.yml` runs i
 and weekly against the latest PoB, so a league update that breaks something shows up quickly.
 
 ## Limitations
+
+- `popular_builds` reads poe.ninja's undocumented build API (protobuf search results and
+  binary string dictionaries). It works against the site as of November 2026 and may need
+  updating if poe.ninja changes its format; errors then say the format changed.
 
 - PoE1 / PoB Community only (not PoB for PoE2).
 - No character import from the PoE website (load a build code or XML instead).

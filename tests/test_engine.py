@@ -328,3 +328,25 @@ def test_damage_type_breakdown_and_life_reservation(engine):
     assert any("Base damage" in line for line in br)
     msgs = [w["message"] for w in engine.call("warnings")["warnings"]]
     assert any("of life is reserved" in m for m in msgs)
+
+
+def test_flasks(deadeye):
+    before = deadeye.call("stats", {"keys": ["Evasion"]})["Evasion"]
+    res = deadeye.call("apply_edits", {"edits": [
+        {"op": "create_flask", "base": "Jade Flask", "affixes": ["FlaskEffectReducedDuration3", "FlaskBuffEvasionWhileHealing4"]}]})
+    assert "Flask 1" in res["notes"][0]
+    on = deadeye.call("stats", {"keys": ["Evasion"]})["Evasion"]
+    assert on > before
+    deadeye.call("apply_edits", {"edits": [{"op": "set_flask_active", "slot": "Flask 1", "enabled": False}]})
+    assert deadeye.call("stats", {"keys": ["Evasion"]})["Evasion"] == before
+    with pytest.raises(PobError, match="one prefix"):
+        deadeye.call("apply_edits", {"edits": [{"op": "create_flask", "base": "Jade Flask",
+                                                "affixes": ["FlaskIncreasedDuration6", "FlaskEffectReducedDuration3"]}]})
+
+
+def test_auto_allocate_targets(deadeye):
+    life = deadeye.call("stats", {"keys": ["Life"]})["Life"]
+    res = deadeye.call("auto_allocate", {"points": 25, "weights": {"CombinedDPS": 1},
+                                         "targets": {"Life": life + 150}, "max_seconds": 60})
+    assert res["targets"]["Life"]["met"]
+    assert res["allocated"][0].get("forTargets")

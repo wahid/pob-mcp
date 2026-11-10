@@ -25,6 +25,11 @@ the build sustains it part of the time, report the number both with and without 
   same number at range while moving.
 - Cooldown-gated and trigger skills: check the trigger rate PoB uses.
 - Full DPS summing multiple skills assumes all of them are used together.
+- Extra projectiles against one target (Barrage-style supports, shotgunning): PoB's
+  single-target number assumes they all hit. Against a large boss many do; against a
+  small or moving one far fewer. Report such numbers as an upper bound.
+- Guard skills (Steelskin and similar) raise max hit only while active; report max hit
+  with and without them and treat the lower one as the baseline.
 
 ## Supports PoB overrates
 
@@ -33,6 +38,10 @@ Support gems with conditions PoB cannot see:
   hurts clear in game.
 - Supports that need a specific state (enemy hit recently, close range, charges) look
   great if the config says the state is always true.
+- Supports that need the build to do something specific: Trinity only pays off when hits
+  deal two or three elements, so a pure-lightning build gets almost nothing from it (and
+  setting its resonance to maximum in config inflates the number). Check what a support
+  needs, and look at its real contribution in `rank_support_gems`' `currentSupports`.
 - Prefer supports with unconditional more multipliers unless the condition really holds.
 `rank_support_gems` reports what PoB calculates; apply this judgment on top.
 

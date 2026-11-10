@@ -47,7 +47,10 @@ mcp = FastMCP(
         "evaluate_scenarios and compare_builds help explain a build; plan_leveling makes "
         "leveling trees; render_tree draws the tree. Item sets and config sets keep alternatives "
         "(budget gear, mapping vs boss); rank_anoints and create_cluster_jewel cover anoints and "
-        "cluster jewels; list_saved_builds / load_saved_build / watch_builds_folder work with "
+        "cluster jewels; create_flask equips magic flasks; popular_builds shows what ladder players "
+        "run (poe.ninja); read_build_guide (or the design_build / review_build prompts) gives the "
+        "build-design method to follow when creating or judging a build; "
+        "list_saved_builds / load_saved_build / watch_builds_folder work with "
         "PoB's own Builds folder. "
         "All numbers come from Path of Building's own calculation engine."
     ),
@@ -90,7 +93,7 @@ EditOp = Literal[
     "add_gem", "remove_gem", "replace_gem", "set_gem",
     "set_main_skill", "set_group_enabled",
     # items
-    "equip_item", "equip_unique", "create_rare", "unequip_slot",
+    "equip_item", "equip_unique", "create_rare", "create_flask", "set_flask_active", "unequip_slot",
     # configuration
     "set_config", "add_custom_mod",
 ]
@@ -130,6 +133,11 @@ class Edit(BaseModel):
         "lines; checked against the base's mod pool, with warnings, or an error if strict=true), "
         "+ optional crafted (one bench mod line), name, implicits (default: the base's implicit), "
         "item_level, quality, sockets. "
+        "create_flask: base (e.g. 'Quicksilver Flask', 'Divine Life Flask') + affixes (at most one "
+        "prefix and one suffix id from list_item_mods on that base) + optional slot (default: first "
+        "empty Flask slot), quality (default 20), enabled=false to equip it switched off. Equipped "
+        "flasks are switched on, which is what PoB counts. set_flask_active: slot ('Flask 1'..'Flask 5') "
+        "+ enabled. "
         "equip_item: slot + item_text (pasted item). unequip_slot: slot. "
         "CONFIG  set_config: var + value (see list_config_options). add_custom_mod: mod."
     ))
@@ -559,6 +567,7 @@ def auto_allocate_passives(
     include_small: bool = False,
     avoid: list[str] | None = None,
     max_seconds: int = 40,
+    targets: dict[str, float] | None = None,
 ) -> dict:
     """Spend passive points automatically with a greedy optimiser that uses PoB's calculator.
 
@@ -571,12 +580,18 @@ def auto_allocate_passives(
     keystones are excluded here unless include_keystones=true. Masteries are not chosen
     automatically. If it hits the time limit the progress is kept; call it again to continue.
     Use undo_last_change to revert the whole run.
+
+    `targets` sets minimums to reach first, e.g. {"PhysicalMaximumHitTaken": 10000,
+    "LightningMaximumHitTaken": 30000}: while any is unmet, points go to the nodes that close
+    the gaps fastest; after that, to the weights, never dropping a met target below its
+    minimum. The result reports each target's status. If the tree cannot close a gap, the
+    remaining points go to the weights and `targetNote` says so.
     """
     snapshot = _call("export_xml")["xml"]
     res = _call("auto_allocate", {
         "weights": weights, "points": points, "max_path_cost": max_path_cost,
         "include_keystones": include_keystones, "include_small": include_small,
-        "avoid": avoid or [], "max_seconds": max_seconds,
+        "avoid": avoid or [], "max_seconds": max_seconds, "targets": targets or {},
     })
     _history.append(snapshot)
     del _history[:-_MAX_HISTORY]
@@ -644,6 +659,21 @@ def trade_search(slot: str, weights: dict[str, float] | None = None, base: str |
     return {"league": lg, "slot": slot, "category": w["category"], "currentItem": w.get("currentItem"),
             "minimumWeightedSum": min_sum or None, "statWeights": w["stats"],
             **online.trade_url(lg, query), "query": query}
+
+
+@mcp.tool()
+def popular_builds(ascendancy: str | None = None, skill: str | None = None, league: str | None = None,
+                   top: int = 10) -> dict:
+    """What ladder players actually run, from poe.ninja's build data (current league by
+    default): how many characters match, and the share using each ascendancy, main skill,
+    keystone/key notable, unique, anoint, mastery, bloodline and pantheon. Filter by
+    `ascendancy` (e.g. "Deadeye") and/or main `skill` (e.g. "Lightning Arrow").
+
+    Use it to sanity-check a design against what works this league (which uniques and
+    keystones a skill's players rely on), not as a template to copy. The ladder is biased
+    toward strong, popular and expensive builds. poe.ninja's API is undocumented, so this can
+    break if the site changes."""
+    return online.build_stats(league=league, ascendancy=ascendancy, skill=skill, top=max(1, min(top, 50)))
 
 
 @mcp.tool()
@@ -905,6 +935,81 @@ def list_keystones() -> dict:
     """All keystones on the passive tree with their exact stats, plus whether each is allocated
     and its path cost from the current tree."""
     return _call("keystones", need_build=False)
+
+
+# ---------------------------------------------------------------------------
+# The build-design guide (the pob-build-designer skill), served to any client
+# ---------------------------------------------------------------------------
+
+def _guide_dir() -> Path | None:
+    if os.environ.get("POB_MCP_GUIDE", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None  # guide switched off (e.g. for baseline evaluations)
+    here = Path(__file__).resolve().parent
+    for cand in (here / "skill",  # installed wheel
+                 here.parents[1] / "skills" / "pob-build-designer"):  # source checkout
+        if (cand / "SKILL.md").is_file():
+            return cand
+    return None
+
+
+def _guide_files() -> dict[str, Path]:
+    d = _guide_dir()
+    if d is None:
+        return {}
+    files = {"SKILL.md": d / "SKILL.md"}
+    for f in sorted((d / "references").glob("*.md")):
+        files[f.stem] = f
+    return files
+
+
+def _read_guide(name: str) -> str:
+    files = _guide_files()
+    if not files:
+        raise PobError("The build-design guide is not installed with this server")
+    key = name.strip()
+    if key.lower() in ("", "skill", "skill.md", "main", "index"):
+        key = "SKILL.md"
+    key = key.removeprefix("references/").removesuffix(".md") if key != "SKILL.md" else key
+    if key not in files:
+        raise PobError(f"No guide section '{name}'. Available: {', '.join(files)}")
+    text = files[key].read_text(encoding="utf-8")
+    if key == "SKILL.md" and text.startswith("---"):
+        text = text.split("---", 2)[2].lstrip()  # drop the skill frontmatter
+    return text
+
+
+@mcp.tool()
+def read_build_guide(section: str = "SKILL.md") -> dict:
+    """The build-design method for these tools: how to pick a strong concept, scale damage,
+    layer defenses to community benchmarks, choose realistic gear and avoid inflated PoB
+    numbers. Read "SKILL.md" (the default) before designing or judging a build, then the
+    sections it points to: damage-scaling, defense, archetypes, gear-and-progression,
+    pob-pitfalls, sources."""
+    files = _guide_files()
+    return {"section": section, "sections": list(files), "text": _read_guide(section)}
+
+
+@mcp.prompt()
+def design_build(brief: str) -> str:
+    """Design a Path of Exile build from a brief (skill, budget, content goal...)."""
+    return ("Design a Path of Exile 1 build with the Path of Building tools, following this "
+            "method. Read the reference sections it names with read_build_guide when a step "
+            f"needs them.\n\nBrief: {brief}\n\n---\n\n{_read_guide('SKILL.md')}")
+
+
+@mcp.prompt()
+def review_build(build: str) -> str:
+    """Judge an existing build or guide (PoB code, pobb.in link or .xml path)."""
+    return ("Load this build with load_build and judge it with the method below: check the "
+            "configuration, gear realism and defenses, then quantify the two or three best "
+            f"changes with compare_changes.\n\nBuild: {build}\n\n---\n\n{_read_guide('SKILL.md')}"
+            f"\n\n---\n\n{_read_guide('pob-pitfalls')}")
+
+
+@mcp.resource("pob-guide://{section}", mime_type="text/markdown")
+def guide_resource(section: str) -> str:
+    """A section of the build-design guide (SKILL, damage-scaling, defense, ...)."""
+    return _read_guide(section)
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,8 @@ packages = ["src/pob_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/pob_mcp/bridge.lua" = "pob_mcp/bridge.lua"
+"skills/pob-build-designer/SKILL.md" = "pob_mcp/skill/SKILL.md"
+"skills/pob-build-designer/references" = "pob_mcp/skill/references"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

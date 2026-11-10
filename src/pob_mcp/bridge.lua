@@ -546,6 +546,15 @@ function EDIT.allocate_node(e, notes)
 	if node.alloc then notes[#notes + 1] = node.dn .. " already allocated" return end
 	if not node.path then error("Passive node is not reachable: " .. node.dn) end
 	local cost = #node.path
+	local used, ascUsed = spec:CountAllocNodes()
+	if node.ascendancyName and node.ascendancyName == spec.curAscendClassName then
+		if ascUsed + cost > 8 then
+			error(("%s costs %d ascendancy point%s (incl. path) but only %d of 8 are left. Deallocate another ascendancy notable first.")
+				:format(node.dn, cost, cost == 1 and "" or "s", 8 - ascUsed), 0)
+		end
+	elseif not node.ascendancyName and used + cost > pointBudget() then
+		notes[#notes + 1] = ("Warning: this goes over the passive point budget (%d of %d used after this)"):format(used + cost, pointBudget())
+	end
 	spec:AllocNode(node)
 	spec:AddUndoState()
 	notes[#notes + 1] = ("Allocated %s (%d point%s incl. path)"):format(node.dn, cost, cost == 1 and "" or "s")
@@ -1564,6 +1573,17 @@ function API.search_item_bases(p)
 	return { total = total, bases = res }
 end
 
+function setFlaskActive(slotName, state)
+	local itemsTab = B().itemsTab
+	local slot = itemsTab.slots[slotName]
+	if not slot then error("Unknown item slot: " .. tostring(slotName)) end
+	slot.active = state
+	if slot.controls and slot.controls.activate then slot.controls.activate.state = state end
+	if itemsTab.activeItemSet and itemsTab.activeItemSet[slotName] then
+		itemsTab.activeItemSet[slotName].active = state
+	end
+end
+
 local function equipParsed(item, slotName, notes, what)
 	local itemsTab = B().itemsTab
 	local slot = itemsTab.slots[slotName]
@@ -1576,9 +1596,78 @@ local function equipParsed(item, slotName, notes, what)
 	end
 	itemsTab:AddItem(item, true)
 	slot:SetSelItemId(item.id)
+	if slotName:match("^Flask %d$") then
+		-- Flasks only count in PoB's calculations while their slot is switched on
+		setFlaskActive(slotName, true)
+	end
 	itemsTab:PopulateSlots()
 	itemsTab:AddUndoState()
 	notes[#notes + 1] = ("Equipped %s%s in %s"):format(item.name or "item", what or "", slotName)
+end
+
+-- Error for an affix id that isn't in a base's pool; points to tier ids when a group name was given
+local function badAffixError(id, baseName, pool)
+	local tiers = {}
+	for mid, m in pairs(pool) do
+		if m.mod.group == id then tiers[#tiers + 1] = { id = mid, tier = m.tier } end
+	end
+	if #tiers > 0 then
+		table.sort(tiers, function(a, b) return a.tier < b.tier end)
+		local ids = {}
+		for i = 1, math.min(3, #tiers) do ids[#ids + 1] = tiers[i].id end
+		error(("%s is a mod group, not a mod id. Use a tier id, e.g. %s (see list_item_mods)"):format(id, table.concat(ids, ", ")), 0)
+	end
+	error(("%s can't roll on %s (see list_item_mods)"):format(id, baseName), 0)
+end
+
+function EDIT.create_flask(e, notes)
+	local baseName, base = findBase(e.base)
+	if not baseName or not base.flask then
+		error("Unknown flask base: " .. tostring(e.base) .. " (see search_item_bases with item_type Flask)")
+	end
+	local itemsTab = B().itemsTab
+	local slotName = e.slot
+	if not slotName then
+		for i = 1, 5 do
+			local sl = itemsTab.slots["Flask " .. i]
+			if sl and (not sl.selItemId or sl.selItemId == 0) then slotName = "Flask " .. i break end
+		end
+		slotName = slotName or "Flask 1"
+	end
+	local ilvl = e.item_level or 86
+	local probe = new("Item"):Item(("Rarity: MAGIC\n%s\nItem Level: %d"):format(baseName, ilvl))
+	local pool = {}
+	for _, m in ipairs((modPool(probe, ilvl))) do pool[m.id] = m end
+	local lines = { "Rarity: MAGIC", baseName, "Crafted: true" }
+	local nP, nS = 0, 0
+	for _, a in ipairs(e.affixes or {}) do
+		local id, roll = tostring(a), 1
+		if type(a) == "table" then id, roll = tostring(a.id), tonumber(a.roll) or 1 end
+		local m = pool[id]
+		if not m then badAffixError(id, baseName, pool) end
+		if not m.allowed then error(("%s needs item level %d"):format(id, m.mod.level)) end
+		if m.mod.type == "Prefix" then nP = nP + 1 else nS = nS + 1 end
+		lines[#lines + 1] = ("%s: {range:%s}%s"):format(m.mod.type, tostring(roll), id)
+	end
+	if nP > 1 or nS > 1 then error("A magic flask has at most one prefix and one suffix") end
+	lines[#lines + 1] = "Quality: " .. tostring(e.quality or 20)
+	lines[#lines + 1] = "Item Level: " .. tostring(ilvl)
+	local implicits = e.implicits or {}
+	lines[#lines + 1] = "Implicits: " .. tostring(#implicits)
+	for _, l in ipairs(implicits) do lines[#lines + 1] = l end
+	local item = new("Item"):Item(table.concat(lines, "\n"))
+	if #(e.affixes or {}) > 0 then item:Craft() end
+	item:NormaliseQuality()
+	item:BuildModList()
+	equipParsed(item, slotName, notes)
+	if e.enabled == false then setFlaskActive(slotName, false) end
+end
+
+function EDIT.set_flask_active(e, notes)
+	local slotName = e.slot or (e.socket and ("Flask " .. tostring(e.socket)))
+	if not slotName or not tostring(slotName):match("^Flask %d$") then error("set_flask_active needs slot 'Flask 1'..'Flask 5'") end
+	setFlaskActive(slotName, e.enabled ~= false)
+	notes[#notes + 1] = ("%s %s"):format(slotName, e.enabled ~= false and "switched on" or "switched off")
 end
 
 function EDIT.equip_unique(e, notes)
@@ -1627,7 +1716,7 @@ function EDIT.create_rare(e, notes)
 			local id = type(a) == "table" and (a.id or a.mod_id) or a
 			local roll = type(a) == "table" and a.roll or 1
 			local m = pool[id]
-			if not m then error("Mod " .. tostring(id) .. " can't roll on " .. baseName .. " (see list_item_mods)") end
+			if not m then badAffixError(id, baseName, pool) end
 			if not m.allowed then error(("Mod %s needs item level %d"):format(id, m.mod.level)) end
 			if groups[m.mod.group] then error("Two mods from the same group: " .. tostring(m.mod.group)) end
 			groups[m.mod.group] = true
@@ -1722,15 +1811,49 @@ function API.auto_allocate(p)
 	local granted = {}
 	local avoid = {}
 	for _, n in ipairs(p.avoid or {}) do avoid[tostring(n):lower()] = true end
+	-- Minimum targets, e.g. { PhysicalMaximumHitTaken = 10000 }: met first, then kept
+	local targets = {}
+	for stat, v in pairs(p.targets or {}) do targets[stat] = tonumber(v) end
+	local targetsGivenUp = false
 
 	-- Validate stats up front
 	do
 		local _, base = build.calcsTab:GetMiscCalculator()
-		for stat in pairs(weights) do
-			if readStat(base, stat) == nil then
-				error(("Unknown or non-numeric stat '%s'"):format(stat), 0)
+		for _, tbl in ipairs({ weights, targets }) do
+			for stat in pairs(tbl) do
+				if readStat(base, stat) == nil then
+					error(("Unknown or non-numeric stat '%s'"):format(stat), 0)
+				end
 			end
 		end
+	end
+
+	-- Score while some target is unmet: progress toward the unmet targets (each one as a
+	-- share of its remaining gap), with the weighted stats only as a tie-break. Once all
+	-- targets are met: the weighted stats, and a candidate that breaks a target is rejected.
+	local function unmetTargets(out)
+		local list = {}
+		for stat, t in pairs(targets) do
+			local v = readStat(out, stat) or 0
+			if v < t then list[stat] = v end
+		end
+		return list
+	end
+	local function scoreOut(bases, baseUnmet, out)
+		local ws = weightedScore(weights, bases, out)
+		if not targetsGivenUp and next(baseUnmet) then
+			local ts = 0
+			for stat, bv in pairs(baseUnmet) do
+				local t = targets[stat]
+				local v = math.min(readStat(out, stat) or 0, t)
+				ts = ts + (v - bv) / (t - bv) * 100
+			end
+			return ts * 1000 + ws * 0.01, ts
+		end
+		for stat, t in pairs(targets) do
+			if (bases[stat] or 0) >= t and (readStat(out, stat) or 0) < t then return -math.huge end
+		end
+		return ws
 	end
 
 	while spent < budget do
@@ -1742,6 +1865,8 @@ function API.auto_allocate(p)
 		granted = build.calcsTab.mainEnv.grantedPassives or {}
 		local bases = {}
 		for stat in pairs(weights) do bases[stat] = readStat(base, stat) end
+		for stat in pairs(targets) do bases[stat] = readStat(base, stat) end
+		local baseUnmet = unmetTargets(base)
 		local remaining = budget - spent
 		local useFull = weights.FullDPS ~= nil
 
@@ -1755,7 +1880,7 @@ function API.auto_allocate(p)
 				and not avoid[node.dn:lower()] then
 				local key = node.modKey
 				if cache[key] == nil then
-					cache[key] = weightedScore(weights, bases, calcFunc({ addNodes = { [node] = true } }, useFull))
+					cache[key] = scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
 				end
 				cands[#cands + 1] = { node = node, est = cache[key] / #node.path }
 			end
@@ -1764,13 +1889,19 @@ function API.auto_allocate(p)
 		table.sort(cands, function(a, b) return a.est > b.est end)
 
 		-- Pass 2: exact value of the whole path for the shortlist
-		local best, bestScore
+		local best, bestScore, bestTarget
 		for i = 1, math.min(shortlist, #cands) do
 			local node = cands[i].node
 			local set = {}
 			for _, pn in ipairs(node.path) do set[pn] = true end
-			local sc = weightedScore(weights, bases, calcFunc({ addNodes = set }, useFull)) / #node.path
-			if not bestScore or sc > bestScore then best, bestScore = node, sc end
+			local sc, ts = scoreOut(bases, baseUnmet, calcFunc({ addNodes = set }, useFull))
+			sc = sc / #node.path
+			if not bestScore or sc > bestScore then best, bestScore, bestTarget = node, sc, ts end
+		end
+		if not targetsGivenUp and next(baseUnmet) and (not best or (bestTarget or 0) <= 0) then
+			-- Nothing on the tree moves the unmet targets: carry on with the weights only
+			targetsGivenUp = true
+			goto continue
 		end
 		if not best or bestScore <= 0 then stopReason = "no remaining node improves the weighted stats" break end
 
@@ -1779,14 +1910,34 @@ function API.auto_allocate(p)
 		spent = spent + cost
 		rebuild()
 		chosen[#chosen + 1] = { name = best.dn, type = best.type, cost = cost,
+			forTargets = (not targetsGivenUp and next(baseUnmet) ~= nil) or nil,
 			scorePerPoint = math.floor(bestScore * 100 + 0.5) / 100 }
+		::continue::
 	end
 	spec:AddUndoState()
 
 	local after = {}
 	for stat in pairs(weights) do after[stat] = readStat(output(), stat) end
-	return { weights = weights, pointsBudget = budget, pointsSpent = spent,
+	local res = { weights = weights, pointsBudget = budget, pointsSpent = spent,
 		allocated = chosen, stoppedBecause = stopReason or "budget used", stats = after, info = info() }
+	if next(targets) then
+		local status = {}
+		for stat, t in pairs(targets) do
+			local v = readStat(output(), stat) or 0
+			status[stat] = { target = t, value = num(v), met = v >= t }
+			after[stat] = num(v)
+		end
+		res.targets = status
+		local anyUnmet = false
+		for _, st in pairs(status) do if not st.met then anyUnmet = true end end
+		if targetsGivenUp then
+			res.targetNote = "No passive node within reach of the remaining points moves the unmet targets, so those points went to the weights. "
+				.. "Close the gap with gear, gems, flasks or config (or a larger max_path_cost)."
+		elseif anyUnmet then
+			res.targetNote = "The point budget ran out before every target was met. Close the gap with gear, gems, flasks or config, or free points elsewhere."
+		end
+	end
+	return res
 end
 
 -------------------------------------------------------------------------------
@@ -2592,6 +2743,21 @@ local function breakdownLines(b)
 	if type(b) ~= "table" then return lines end
 	for _, l in ipairs(b) do
 		if type(l) == "string" then lines[#lines + 1] = cleanText(l) end
+	end
+	if type(b.damageTypes) == "table" and #b.damageTypes > 0 then
+		-- Per source damage type (after conversion): base, increased and more, as in the Calcs tab
+		lines[#lines + 1] = "Scaling by source damage type:"
+		for _, r in ipairs(b.damageTypes) do
+			local parts = {}
+			if r.base then parts[#parts + 1] = "base " .. r.base end
+			if r.inc then parts[#parts + 1] = "increased " .. r.inc end
+			if r.more then parts[#parts + 1] = "more " .. r.more end
+			if r.convSrc then parts[#parts + 1] = "converted/gained in " .. r.convSrc end
+			if r.convDst then parts[#parts + 1] = "converts " .. r.convDst end
+			if r.gainDst then parts[#parts + 1] = r.gainDst end
+			local line = ("  %s: %s = %s"):format(tostring(r.source), table.concat(parts, ", "), tostring(r.total or "?"))
+			lines[#lines + 1] = (line:gsub("(%d+%.%d%d)%d+", "%1"))
+		end
 	end
 	if b.slots then
 		for _, s in ipairs(b.slots) do

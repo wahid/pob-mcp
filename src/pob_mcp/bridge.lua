@@ -2166,7 +2166,9 @@ local function lnsImprove(p, res, protected)
 		if n > 0 then kept[#kept + 1] = { round = 0, masterySwaps = n } end
 	end
 	local current = feasible(output()) and value(output()) or nil
-	local best, bestState = current or -math.huge, nil
+	-- start from the tree as given: with lns_temperature, accepted sideways moves can leave
+	-- the search on a worse tree, and it must still end on the best one it saw
+	local best, bestState = current or -math.huge, current and spec:CreateUndoState() or nil
 	math.randomseed(p.seed or 1)
 	local seed = 0
 	for round = 1, rounds do
@@ -2208,6 +2210,10 @@ local function lnsImprove(p, res, protected)
 		-- only get better by moving a whole region elsewhere
 		local regionNotables
 		if p.lns_region ~= false and round % 2 == 0 then
+		-- lns_regions > 1: clear up to that many separate regions at once, so damage given up
+		-- in one place can pay for cheaper defence in another within a single move
+		local nRegions = math.random(1, math.max(1, p.lns_regions or 1))
+		for _ = 1, nRegions do
 			local cands = {}
 			for id, node in pairs(spec.allocNodes) do
 				if not protected[id] and not node.ascendancyName and id < 65536
@@ -2224,13 +2230,14 @@ local function lnsImprove(p, res, protected)
 			end
 			if #cands > 0 then
 				local root = cands[math.random(#cands)]
-				regionNotables = {}
+				regionNotables = regionNotables or {}
 				for _, d in ipairs(root.depends) do
 					if d.type == "Notable" then regionNotables[#regionNotables + 1] = d.dn end
 					removed[#removed + 1] = d.dn
 				end
 				spec:DeallocNode(root)
 			end
+		end
 		end
 		for i = 1, (regionNotables and 0 or pool) do
 			if #removed >= k then break end

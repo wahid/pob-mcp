@@ -1,16 +1,6 @@
-# Dependabot version updates
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
 version: 2
 updates:
-  # Python dependencies declared in pyproject.toml (mcp, lupa, pillow, pytest)
   - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-
-  # Actions used in .github/workflows (checkout, setup-python, pypi-publish, ...)
-  - package-ecosystem: "github-actions"
-    directory: "/"
+    directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"

@@ -2306,7 +2306,14 @@ function API.auto_allocate(p)
 	local mainAtStart = B().skillsTab.socketGroupList[B().mainSocketGroup]
 	local countAtStart = B().spec:CountAllocNodes()
 	local protected = {}
-	for id in pairs(B().spec.allocNodes) do protected[id] = true end
+	for id, node in pairs(B().spec.allocNodes) do
+		-- lns_from_current: improve the tree as it is; only the picks reset_tree keeps
+		-- (ascendancy, keystones, jewel sockets) are fixed, every other node may be dropped
+		if not p.lns_from_current or node.ascendancyName or node.type == "Keystone"
+			or node.type == "Socket" or node.type == "ClassStart" or id >= 65536 then
+			protected[id] = true
+		end
+	end
 	local ok, res
 	if p.target_mode == "slack" and p.targets and next(p.targets) then
 		-- slack estimates can be optimistic: retry with a wider margin, then targets-first

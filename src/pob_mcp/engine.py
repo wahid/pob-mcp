@@ -75,7 +75,7 @@ def fetch_build_url(url: str, timeout: float = 20) -> str:
             break
     if raw is None:
         raw = url.strip()
-    req = urllib.request.Request(raw, headers={"User-Agent": "pob-mcp/0.1"})
+    req = urllib.request.Request(raw, headers={"User-Agent": "pathofbuilding-mcp/0.5"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             return resp.read().decode("utf-8").strip()

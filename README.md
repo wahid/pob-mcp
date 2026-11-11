@@ -3,6 +3,12 @@
 An MCP server that runs **Path of Building Community** (Path of Exile 1) headlessly, so Claude
 (or any MCP client) can read builds, get real PoB numbers, test changes and export the result.
 
+```
+pip install pathofbuilding-mcp
+```
+
+It also needs a checkout of the Path of Building source; see [Setup](#setup).
+
 It doesn't re-implement any game math: it boots PoB's own Lua code inside an embedded LuaJIT
 (via [`lupa`](https://pypi.org/project/lupa/)), so every number matches what the PoB app shows
 for the same build and config.
@@ -111,14 +117,14 @@ Gem names work with or without the "Support" suffix.
 
    `git pull` it whenever PoB updates for a new league.
 
-2. **Install this package** (Python 3.10+):
+2. **Install this package** (Python 3.10+) from PyPI:
 
    ```
-   pip install ./pob-mcp
+   pip install pathofbuilding-mcp
    ```
 
-   For development, use `pip install -e ./pob-mcp` so code changes take effect without
-   reinstalling.
+   `pip install -U pathofbuilding-mcp` updates it. For development, clone this repo and use
+   `pip install -e .` so code changes take effect without reinstalling.
 
    This pulls in `mcp`, `lupa` and `pillow` (for tree pictures). `lupa` ships its own
    LuaJIT, so there's nothing else to install — no system Lua, no luarocks.
@@ -129,15 +135,15 @@ Gem names work with or without the "Support" suffix.
    {
      "mcpServers": {
        "path-of-building": {
-         "command": "pob-mcp",
+         "command": "pathofbuilding-mcp",
          "env": { "POB_PATH": "C:\\Users\\you\\PathOfBuilding" }
        }
      }
    }
    ```
 
-   If `pob-mcp` isn't on PATH, use `"command": "python", "args": ["-m", "pob_mcp"]`.
-   For Claude Code: `claude mcp add pob -e POB_PATH=/path/to/PathOfBuilding -- pob-mcp`.
+   If `pathofbuilding-mcp` isn't on PATH, use `"command": "python", "args": ["-m", "pob_mcp"]`.
+   For Claude Code: `claude mcp add pob -e POB_PATH=/path/to/PathOfBuilding -- pathofbuilding-mcp`.
 
 `POB_PATH` can point at the checkout or its `src` folder; `--pob-path` works too. If unset, the
 server looks in `~/PathOfBuilding`.

@@ -17,7 +17,7 @@ import urllib.request
 
 from .engine import PobError
 
-USER_AGENT = "pob-mcp/0.4 (Path of Building MCP server; personal use)"
+USER_AGENT = "pathofbuilding-mcp/0.5 (Path of Building MCP server; personal use)"
 NINJA = "https://poe.ninja/poe1/api/economy"
 POE = "https://www.pathofexile.com"
 UNIQUE_TYPES = ["UniqueWeapon", "UniqueArmour", "UniqueAccessory", "UniqueFlask", "UniqueJewel"]

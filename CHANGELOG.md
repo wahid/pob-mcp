@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.4.0
+## 0.5.0
+
+Published on PyPI as `pathofbuilding-mcp` (`pip install pathofbuilding-mcp`); the command is
+now `pathofbuilding-mcp`.
 
 Optimiser and tree fixes (from the tree-rebuild benchmark, now 17/19 matches)
 - `auto_allocate_passives`: `target_mode` "slack" and "repair"; masteries up to 6 points
@@ -11,6 +14,8 @@ Optimiser and tree fixes (from the tree-rebuild benchmark, now 17/19 matches)
 - `reset_tree` keeps jewels in cluster-jewel sockets and the route to Split Personality.
 - `get_passive_tree`: `distanceJewels`, and `include_nodes` to list every allocated node.
 - `rank_passives(mode="remove")` no longer crashes on builds with runegrafts.
+
+## 0.4.0
 
 New tools
 - `load_ladder_build`: load a real poe.ninja ladder character (random, top, by rank, or by

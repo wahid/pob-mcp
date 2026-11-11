@@ -334,10 +334,13 @@ def list_item_slots() -> dict:
 
 
 @mcp.tool()
-def get_passive_tree() -> dict:
+def get_passive_tree(include_nodes: bool = False) -> dict:
     """Allocated keystones, notables, masteries and ascendancy nodes, points used,
-    and the official passive tree URL."""
-    return _call("tree")
+    and the official passive tree URL. `distanceJewels` lists jewels that grow with their
+    socket's distance from the class start (Split Personality) with that distance.
+    include_nodes=true adds every allocated node (id, name, type, stat text), small
+    passives included, for diffing two trees."""
+    return _call("tree", {"nodes": include_nodes})
 
 
 @mcp.tool()
@@ -572,7 +575,7 @@ def list_mastery_effects(node: str | None = None) -> dict:
 def auto_allocate_passives(
     weights: dict[str, float] | None = None,
     points: int | None = None,
-    max_path_cost: int = 8,
+    max_path_cost: int = 10,
     include_keystones: bool = False,
     include_small: bool | None = None,
     avoid: list[str] | None = None,
@@ -583,6 +586,7 @@ def auto_allocate_passives(
     anoint: bool = False,
     fast: bool = True,
     target_weight: float | None = None,
+    target_mode: Literal["first", "slack", "repair"] = "first",
     refine: bool = True,
     lns_rounds: int = 0,
     lns_seconds: int = 120,
@@ -619,6 +623,13 @@ def auto_allocate_passives(
     By default unmet targets come strictly first. `target_weight` (e.g. 1) blends instead:
     each node scores its weighted gain plus target_weight x its progress toward the unmet
     targets (in % of each gap), which keeps more damage when targets are expensive.
+    target_mode="slack" spends on the weights while the points left comfortably exceed what
+    the unmet targets still need (estimated from the best target progress per point), and
+    switches to the targets when that slack runs out; nodes that lower a target are skipped.
+    It suits builds whose damage nodes also feed the targets (strength or life stacking).
+    target_mode="repair" spends every point on the weights first, then repeatedly trades
+    the cheapest damage branches for target nodes until every target is met (falling back
+    to targets-first if it cannot).
     After spending, a refinement pass (refine=true) swaps the least valuable added branches
     for better nodes elsewhere while keeping every target met; `swaps` lists what it changed.
 
@@ -626,7 +637,7 @@ def auto_allocate_passives(
     the least valuable branches it added, refills the points with the same targets, and keeps
     the result only if it is better and still meets every target (`lns` lists the kept
     rounds). 10-20 rounds noticeably improve tight builds; budget lns_seconds accordingly.
-    Masteries up to 4 points away (with their path) are candidates, so gear-conditional
+    Masteries up to 6 points away (with their path) are candidates, so gear-conditional
     masteries are found too.
 
     fast=true (default) reuses earlier per-node estimates between full refreshes every few
@@ -638,7 +649,7 @@ def auto_allocate_passives(
         "include_keystones": include_keystones, "include_small": include_small,
         "avoid": avoid or [], "max_seconds": max_seconds, "targets": targets or {},
         "masteries": masteries, "jewels": jewels or [], "anoint": anoint, "fast": fast,
-        "target_weight": target_weight, "refine": refine,
+        "target_weight": target_weight, "target_mode": target_mode, "refine": refine,
         "lns_rounds": lns_rounds, "lns_seconds": lns_seconds,
     })
     _history.append(snapshot)

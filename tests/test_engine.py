@@ -403,6 +403,26 @@ def test_reset_tree_keeps_ascendancy(deadeye):
     assert s["passivePointsUsed"] <= 10
 
 
+def test_reset_tree_keeps_split_personality_route(occ):
+    nodes = occ.call("tree", {"nodes": True})["nodes"]
+    sockets = [n["id"] for n in nodes if n["type"] == "Socket" and n["id"] < 65536]
+    assert sockets
+    edit(occ, {"op": "equip_unique", "name": "Split Personality", "slot": f"Jewel {sockets[0]}"})
+    before = occ.call("tree")["distanceJewels"][0]["distance"]
+    assert before > 0
+    res = edit(occ, {"op": "reset_tree"})
+    assert any("route" in n for n in res["notes"])
+    assert occ.call("tree")["distanceJewels"][0]["distance"] == before
+
+
+def test_auto_allocate_slack_mode(deadeye):
+    life = deadeye.call("stats", {"keys": ["Life"]})["Life"]
+    res = deadeye.call("auto_allocate", {"points": 20, "weights": {"CombinedDPS": 1}, "max_seconds": 60,
+                                         "targets": {"Life": life * 1.1}, "target_mode": "slack"})
+    assert res["slackTries"]
+    assert res["targets"]["Life"]["met"]
+
+
 def test_auto_allocate_keeps_build_valid(deadeye):
     res = deadeye.call("auto_allocate", {"points": 30, "weights": {"CombinedDPS": 1}, "max_seconds": 60})
     assert all(v["met"] for v in (res.get("validity") or {}).values())

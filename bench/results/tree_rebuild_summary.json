@@ -1,30 +1,18 @@
 {
  "ascendant": {
-  "dps": 0.634,
-  "worstHit": 1.006,
-  "valid": false,
-  "match": false,
-  "run": "run5"
- },
- "assassin": {
-  "dps": 1.137,
-  "worstHit": 1.004,
+  "dps": 0.953,
+  "worstHit": 1.073,
   "valid": true,
   "match": true,
-  "run": "run4"
+  "strategy": "slack",
+  "run": "run7"
  },
  "berserker": {
   "dps": 0.967,
   "worstHit": 1.005,
   "valid": true,
   "match": true,
-  "run": "run4"
- },
- "champion": {
-  "dps": 1.173,
-  "worstHit": 0.987,
-  "valid": true,
-  "match": true,
+  "strategy": "blend",
   "run": "run4"
  },
  "chieftain": {
@@ -32,55 +20,31 @@
   "worstHit": 0.988,
   "valid": true,
   "match": true,
+  "strategy": "targets-first+small",
   "run": "run4"
- },
- "deadeye": {
-  "dps": 0.73,
-  "worstHit": 0.998,
-  "valid": true,
-  "match": false,
-  "run": "run5"
  },
  "elementalist": {
-  "dps": 0.809,
-  "worstHit": 0.994,
+  "dps": 0.911,
+  "worstHit": 0.992,
   "valid": true,
-  "match": false,
-  "run": "run5"
- },
- "gladiator": {
-  "dps": 0.488,
-  "worstHit": 0.67,
-  "valid": true,
-  "match": false,
-  "run": "run4"
+  "match": true,
+  "strategy": "slack",
+  "run": "run8"
  },
  "guardian": {
   "dps": 1.165,
   "worstHit": 1.039,
   "valid": true,
   "match": true,
+  "strategy": "targets-first+small",
   "run": "run4"
- },
- "hierophant": {
-  "dps": 0.707,
-  "worstHit": 0.982,
-  "valid": true,
-  "match": false,
-  "run": "run5"
  },
  "inquisitor": {
   "dps": 1.026,
   "worstHit": 1.001,
   "valid": true,
   "match": true,
-  "run": "run4"
- },
- "juggernaut": {
-  "dps": 0.268,
-  "worstHit": 0.897,
-  "valid": true,
-  "match": false,
+  "strategy": "targets-first+small",
   "run": "run4"
  },
  "necromancer": {
@@ -88,13 +52,7 @@
   "worstHit": 0.985,
   "valid": true,
   "match": true,
-  "run": "run4"
- },
- "occultist": {
-  "dps": 0.932,
-  "worstHit": 1.013,
-  "valid": true,
-  "match": true,
+  "strategy": "targets-first+small",
   "run": "run4"
  },
  "pathfinder": {
@@ -102,34 +60,95 @@
   "worstHit": 1.028,
   "valid": true,
   "match": true,
+  "strategy": "targets-first",
   "run": "run4"
- },
- "saboteur": {
-  "dps": 0.887,
-  "worstHit": 0.98,
-  "valid": true,
-  "match": false,
-  "run": "run5"
  },
  "slayer": {
   "dps": 1.552,
   "worstHit": 0.987,
   "valid": true,
   "match": true,
+  "strategy": "targets-first",
   "run": "run4"
- },
- "trickster": {
-  "dps": 0.508,
-  "worstHit": 0.985,
-  "valid": true,
-  "match": false,
-  "run": "run5"
  },
  "warden": {
   "dps": 0.964,
   "worstHit": 0.994,
   "valid": true,
   "match": true,
+  "strategy": "targets-first+small",
   "run": "run4"
+ },
+ "assassin": {
+  "dps": 1.137,
+  "worstHit": 1.004,
+  "valid": true,
+  "match": true,
+  "strategy": "targets-first+small",
+  "run": "run4"
+ },
+ "champion": {
+  "dps": 1.22,
+  "worstHit": 1.0,
+  "valid": true,
+  "match": true,
+  "strategy": null,
+  "run": "run1"
+ },
+ "deadeye": {
+  "dps": 0.91,
+  "worstHit": 1.044,
+  "valid": true,
+  "match": true,
+  "strategy": "targets-first",
+  "run": "run7"
+ },
+ "gladiator": {
+  "dps": 0.816,
+  "worstHit": 0.981,
+  "valid": true,
+  "match": false,
+  "strategy": "slack",
+  "run": "run17"
+ },
+ "hierophant": {
+  "dps": 0.852,
+  "worstHit": 0.988,
+  "valid": true,
+  "match": false,
+  "strategy": "slack",
+  "run": "run17"
+ },
+ "juggernaut": {
+  "dps": 0.933,
+  "worstHit": 0.981,
+  "valid": true,
+  "match": true,
+  "strategy": "slack",
+  "run": "run10"
+ },
+ "occultist": {
+  "dps": 0.932,
+  "worstHit": 1.013,
+  "valid": true,
+  "match": true,
+  "strategy": "targets-first+small",
+  "run": "run4"
+ },
+ "saboteur": {
+  "dps": 0.935,
+  "worstHit": 0.981,
+  "valid": true,
+  "match": true,
+  "strategy": "slack",
+  "run": "run8"
+ },
+ "trickster": {
+  "dps": 0.965,
+  "worstHit": 1.003,
+  "valid": true,
+  "match": true,
+  "strategy": "slack",
+  "run": "run14"
  }
 }

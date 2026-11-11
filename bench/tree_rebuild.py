@@ -29,10 +29,13 @@ HIT_KEYS = ["PhysicalMaximumHitTaken", "FireMaximumHitTaken", "ColdMaximumHitTak
             "LightningMaximumHitTaken", "ChaosMaximumHitTaken"]
 OTHER_KEYS = ["Life", "EnergyShield", "TotalEHP", "FullDPS", "CombinedDPS", "Minion.CombinedDPS",
               "ManaUnreserved", "LifeUnreserved"]
+# avoidance layers: chances that only pay off near their cap (suppression halves spell hits
+# only at 100%), so the greedy never sees value in one node; the rebuild keeps the original's
+LAYER_KEYS = ["SpellSuppressionChance", "BlockChance", "SpellBlockChance"]
 
 
 def measure(e: PobEngine) -> dict:
-    st = e.call("stats", {"keys": HIT_KEYS + OTHER_KEYS})
+    st = e.call("stats", {"keys": HIT_KEYS + OTHER_KEYS + LAYER_KEYS})
     summary = e.call("summary")
     st["pointsUsed"] = summary.get("passivePointsUsed")
     st["warnings"] = [w["message"] for w in e.call("warnings")["warnings"]]
@@ -68,8 +71,8 @@ def pick_metric(st: dict) -> str:
     return max(cands, key=cands.get)
 
 
-def run_one(e: PobEngine, path: str, max_seconds: int, hit_target: float, max_path_cost: int = 8,
-            lns_rounds: int = 0, strategies: str = "all") -> dict:
+def run_one(e: PobEngine, path: str, max_seconds: int, hit_target: float, max_path_cost: int = 10,
+            lns_rounds: int = 0, strategies: str = "all", lns_seconds: int | None = None) -> dict:
     xml = Path(path).read_text(encoding="utf-8")
     e.load_build(xml, Path(path).stem)
     orig = measure(e)
@@ -83,22 +86,31 @@ def run_one(e: PobEngine, path: str, max_seconds: int, hit_target: float, max_pa
     for k in ("ManaUnreserved", "LifeUnreserved"):
         if (orig.get(k) or 0) > 0:
             targets[k] = round(orig[k] * hit_target)
+    # and the same avoidance layers (exact: these chances are worth most at their cap)
+    for k in LAYER_KEYS:
+        if (orig.get(k) or 0) >= 20:
+            targets[k] = orig[k]
     t0 = time.time()
     reset_xml = e.call("export_xml")["xml"]
     best = None
-    plans = (("targets-first", None, False), ("blend", 1.0, False), ("targets-first+small", None, True))
+    plans = (("targets-first", None, False), ("blend", 1.0, False), ("targets-first+small", None, True),
+             ("slack", "slack", True), ("repair", "repair", True))
     if strategies != "all":
         plans = tuple(x for x in plans if x[0] in strategies.split(","))
     for strategy, tw, small in plans:
         e.load_build(reset_xml, Path(path).stem)
         args = {"points": budget, "weights": {metric: 1}, "targets": targets, "masteries": True,
                 "max_seconds": max_seconds, "max_path_cost": max_path_cost}
-        if tw is not None:
+        if tw in ("slack", "repair"):
+            args["target_mode"] = tw
+        elif tw is not None:
             args["target_weight"] = tw
         args["include_small"] = small
         if lns_rounds:
             args["lns_rounds"] = lns_rounds
-            args["lns_seconds"] = max_seconds * 4
+            args["lns_seconds"] = lns_seconds or max_seconds * 4
+            args["lns_max_drop"] = 8
+            args["lns_temperature"] = 2
         res = e.call("auto_allocate", args)
         # measure what survives a save/reload, so session-only effects can't count
         xml_now = e.call("export_xml")["xml"]
@@ -146,9 +158,10 @@ def main():
     ap.add_argument("--max-seconds", type=int, default=300)
     ap.add_argument("--hit-target", type=float, default=0.98, help="share of original max hits to require")
     ap.add_argument("--dps-share", type=float, default=0.9)
-    ap.add_argument("--max-path-cost", type=int, default=8)
+    ap.add_argument("--max-path-cost", type=int, default=10)
     ap.add_argument("--lns-rounds", type=int, default=0, help="large-neighbourhood search rounds after the greedy fill")
-    ap.add_argument("--strategies", default="all", help="comma list: targets-first, blend, targets-first+small")
+    ap.add_argument("--lns-seconds", type=int, default=None, help="time for the LNS (default 4x --max-seconds)")
+    ap.add_argument("--strategies", default="all", help="comma list: targets-first, blend, targets-first+small, slack, repair")
     ap.add_argument("--save-dir", default=None, help="save each rebuilt build here as XML")
     ap.add_argument("--hit-share", type=float, default=0.95)
     a = ap.parse_args()
@@ -156,7 +169,7 @@ def main():
     results = []
     for path in a.builds:
         try:
-            r = run_one(e, path, a.max_seconds, a.hit_target, a.max_path_cost, a.lns_rounds, a.strategies)
+            r = run_one(e, path, a.max_seconds, a.hit_target, a.max_path_cost, a.lns_rounds, a.strategies, a.lns_seconds)
             if a.save_dir:
                 Path(a.save_dir).mkdir(parents=True, exist_ok=True)
                 e.call("export_xml") and Path(a.save_dir, Path(path).stem + ".rebuilt.xml").write_text(

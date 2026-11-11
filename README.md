@@ -267,21 +267,24 @@ under Settings → Capabilities → Skills. `evals/` holds two test briefs.
 
 `bench/tree_rebuild.py` measures how well the optimiser rebuilds real characters. For each
 PoB build it records the original's main DPS and max hit per damage type, wipes the tree with
-`reset_tree` (keeping ascendancy, keystones and socketed jewels; gear, gems and config stay),
-and lets `auto_allocate_passives` spend the same points: maximise the DPS while reaching 98%
-of every original max hit and keeping mana, life and attribute requirements valid. Results
-are measured after a save and reload. A rebuild *matches* at ≥ 90% of the DPS with every max
-hit ≥ 95%.
+`reset_tree` (keeping ascendancy, keystones, socketed jewels and the route to distance-scaling
+jewels such as Split Personality; gear, gems and config stay), and lets
+`auto_allocate_passives` spend the same points: maximise the DPS while reaching 98% of every
+original max hit, the original's spell suppression and block chances, and keeping mana, life
+and attribute requirements valid. Each strategy (`targets-first`, `blend`, `slack`, `repair`)
+is tried and the best feasible tree kept. Results are measured after a save and reload. A
+rebuild *matches* at ≥ 90% of the DPS with every max hit ≥ 95%.
 
 ```
 python bench/tree_rebuild.py --pob-path ~/PathOfBuilding builds/*.xml --out results.json \
-    --max-path-cost 12 --lns-rounds 15 --save-dir rebuilt/
+    --strategies slack,repair,targets-first --lns-rounds 20 --save-dir rebuilt/
 ```
 
 Use `load_ladder_build` (or poe.ninja directly) to collect builds. On 19 random geared
-ladder characters (one per ascendancy, November 2026) the optimiser matched 11 and beat the
-original on 8; Claude with the build-design skill, driving the same tools, reached 91-94% of
-the original DPS on two of the hardest misses where the optimiser alone reached 50-62%.
+ladder characters (one per ascendancy, November 2026) the optimiser matches 17 and beats the
+original on 9. The two left (Gladiator 82%, Hierophant 85% of the DPS, both at every max-hit
+target) are trees where the defense targets compete with damage for the same few points.
+`bench/results/README.md` has the per-build numbers.
 
 ## Testing
 

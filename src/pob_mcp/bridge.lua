@@ -306,6 +306,44 @@ local function resolveNode(ref)
 	return best
 end
 
+-- Points a node costs: its path, or 1 when an Intuitive Leap-like jewel covers it
+function pathCostOf(node)
+	if not node.path then return nil end
+	if node.intuitiveLeapLikesAffecting and #node.intuitiveLeapLikesAffecting > 0 then return 1 end
+	return #node.path
+end
+
+-- PoB's calculator fails when asked to remove a runegraft (a mastery node that is not a
+-- mastery type): hide its type for the duration of the calculation
+-- A runegraft sits on a mastery node and is only kept (and saved) with a mastery selection;
+-- any free effect of that mastery will do, the runegraft's own modifier replaces it
+function keepRunegraft(node)
+	if not (node and node.alloc and node.type == "Mastery" and node.overrideType == "AlternateMastery") then return end
+	local spec = B().spec
+	if spec.masterySelections[node.id] then return end
+	for _, effect in ipairs(node.masteryEffects or {}) do
+		if not isValueInTable(spec.masterySelections, effect.effect) then
+			spec.masterySelections[node.id] = effect.effect
+			break
+		end
+	end
+	spec:BuildAllDependsAndPaths()
+end
+
+function calcWithRemoval(calcFunc, override, useFull)
+	local hidden = {}
+	for n in pairs(override.removeNodes or {}) do
+		if type(n) == "table" and n.type == "Mastery" and n.overrideType == "AlternateMastery" then
+			hidden[#hidden + 1] = n
+			n.type = "Runegraft"
+		end
+	end
+	local ok, out = pcall(calcFunc, override, useFull)
+	for _, n in ipairs(hidden) do n.type = "Mastery" end
+	if not ok then error(out, 0) end
+	return out
+end
+
 local function nodeInfo(node)
 	return {
 		id = node.id,
@@ -313,7 +351,7 @@ local function nodeInfo(node)
 		type = node.type,
 		allocated = node.alloc and true or false,
 		ascendancy = node.ascendancyName,
-		pathCost = node.path and #node.path or nil,
+		pathCost = pathCostOf(node),
 		stats = node.sd,
 	}
 end
@@ -450,8 +488,9 @@ function API.slots()
 		note = "Allocate a jewel socket node on the tree to get more 'Jewel <id>' slots" }
 end
 
-function API.tree()
+function API.tree(p)
 	local spec = B().spec
+	p = p or {}
 	local keystones, notables, ascendancy, masteries = {}, {}, {}, {}
 	local smallCount = 0
 	for _, node in pairs(spec.allocNodes) do
@@ -475,6 +514,19 @@ function API.tree()
 		end
 	end
 	table.sort(keystones); table.sort(notables); table.sort(ascendancy); table.sort(masteries)
+	-- jewels whose strength depends on how far their socket is from the class start
+	local distanceJewels = {}
+	local itemsTab = B().itemsTab
+	for id, node in pairs(spec.allocNodes) do
+		if node.type == "Socket" and id < 65536 then
+			local slot = itemsTab.slots["Jewel " .. id]
+			local item = slot and itemsTab.items[slot.selItemId]
+			if item and item.jewelData and item.jewelData.jewelIncEffectFromClassStart then
+				distanceJewels[#distanceJewels + 1] = { socket = id, jewel = item.name, distance = node.distanceToClassStart or 0,
+					effectPct = (node.distanceToClassStart or 0) * item.jewelData.jewelIncEffectFromClassStart }
+			end
+		end
+	end
 	local used, ascUsed = spec:CountAllocNodes()
 	return {
 		className = spec.curClassName,
@@ -487,6 +539,17 @@ function API.tree()
 		ascendancyNodes = ascendancy,
 		masteries = masteries,
 		smallPassives = smallCount,
+		distanceJewels = #distanceJewels > 0 and distanceJewels or nil,
+		nodes = p.nodes and (function()
+			local list = {}
+			for id, node in pairs(spec.allocNodes) do
+				if node.type ~= "ClassStart" and node.type ~= "AscendClassStart" then
+					list[#list + 1] = { id = id, name = node.dn, type = node.type, stats = table.concat(node.sd or {}, " / ") }
+				end
+			end
+			table.sort(list, function(a, b) return a.id < b.id end)
+			return list
+		end)() or nil,
 		url = spec:EncodeURL("https://www.pathofexile.com/passive-skill-tree/"),
 	}
 end
@@ -573,6 +636,7 @@ function EDIT.allocate_node(e, notes)
 		notes[#notes + 1] = ("Warning: this goes over the passive point budget (%d of %d used after this)"):format(used + cost, pointBudget())
 	end
 	spec:AllocNode(node)
+	keepRunegraft(node)
 	spec:AddUndoState()
 	notes[#notes + 1] = ("Allocated %s (%d point%s incl. path)"):format(node.dn, cost, cost == 1 and "" or "s")
 end
@@ -938,7 +1002,7 @@ function API.rank_passives(p)
 			if wanted(node) then
 				local set, n = {}, 0
 				for _, dn in ipairs(node.depends or { node }) do set[dn] = true n = n + 1 end
-				local val = readStat(calcFunc({ removeNodes = set }, useFull), metric)
+				local val = readStat(calcWithRemoval(calcFunc, { removeNodes = set }, useFull), metric)
 				evaluated = evaluated + 1
 				local e = gainEntry({ id = node.id, name = node.dn, type = node.type, pointsRefunded = n,
 					ascendancy = node.ascendancyName, stats = node.sd }, val, baseVal)
@@ -1404,7 +1468,7 @@ function API.list_mastery_effects(p)
 		local node = resolveNode(p.node)
 		if not node or node.type ~= "Mastery" then error("Not a mastery node: " .. tostring(p.node), 0) end
 		res[1] = { id = node.id, name = node.dn, allocated = node.alloc or false,
-			pathCost = node.path and #node.path or nil, effects = masteryOptions(node) }
+			pathCost = pathCostOf(node), effects = masteryOptions(node) }
 	else
 		-- Every mastery that can be allocated right now (adjacent to an allocated notable)
 		local seen = {}
@@ -1736,34 +1800,79 @@ function EDIT.reset_tree(e, notes)
 			end
 		end
 	end
+	-- Jewels that grow with distance from the class start (Split Personality): keep the
+	-- route the build used to reach them, since a shorter route makes the jewel weaker
+	local routes = {}
+	if keep.jewels then
+		local startId = spec.curClass.startNodeId
+		for _, id in ipairs(sockets) do
+			local slot = itemsTab.slots["Jewel " .. id]
+			local item = slot and itemsTab.items[slot.selItemId]
+			if item and item.jewelData and item.jewelData.jewelIncEffectFromClassStart then
+				local prev, queue, o, found = { [id] = false }, { spec.nodes[id] }, 1, nil
+				while o <= #queue and not found do
+					local node = queue[o]; o = o + 1
+					for _, other in ipairs(node.linked) do
+						if other.id == startId then found = node break end
+						if other.alloc and node.type ~= "Mastery" and other.type ~= "ClassStart" and other.type ~= "AscendClassStart" and prev[other.id] == nil then
+							prev[other.id] = node.id; queue[#queue + 1] = other
+						end
+					end
+				end
+				local chain = {}
+				local cur = found and found.id
+				while cur do chain[#chain + 1] = cur; cur = prev[cur] or nil end
+				routes[#routes + 1] = chain  -- class start side first, socket last
+			end
+		end
+	end
 	local before = spec:CountAllocNodes()
 	spec:ResetNodes()
 	spec:BuildAllDependsAndPaths()
 	local kept, failed = 0, {}
 	local function put(list)
 		table.sort(list)
+		-- one at a time with fresh paths: a stale path can leave a node disconnected, and
+		-- BuildAllDependsAndPaths would then silently drop it
 		for _, id in ipairs(list) do
 			local node = spec.nodes[id]
 			if node and not node.alloc then
-				if node.path then spec:AllocNode(node) kept = kept + 1 else failed[#failed + 1] = node.dn or tostring(id) end
+				if node.path then spec:AllocNode(node) spec:BuildAllDependsAndPaths() end
+				if node.alloc then kept = kept + 1 else failed[id] = node.dn or tostring(id) end
 			end
+		end
+	end
+	put(asc)
+	local routed = 0
+	for _, chain in ipairs(routes) do
+		for _, nid in ipairs(chain) do
+			local node = spec.nodes[nid]
+			if node and not node.alloc and node.path then spec:AllocNode(node) routed = routed + 1 end
 		end
 		spec:BuildAllDependsAndPaths()
 	end
-	put(asc)
 	put(sockets)
 	itemsTab:PopulateSlots()
 	build.buildFlag = true
 	rebuild()
 	spec:BuildAllDependsAndPaths()
 	put(cluster)  -- cluster jewel subgraphs exist once their sockets are allocated
+	-- sockets inside a large cluster's subgraph reuse tree socket ids: they only exist once
+	-- the cluster is back, so place them (and anything in them) on a second pass
+	put(sockets)
+	put(cluster)
 	put(keys)
 	spec:AddUndoState()
 	rebuild()
 	local after = spec:CountAllocNodes()
 	notes[#notes + 1] = ("Reset the tree (%d points before, %d now): kept %d ascendancy, %d jewel socket, %d cluster and %d keystone picks with their paths")
 		:format(before, after, #asc, #sockets, #cluster, #keys)
-	if #failed > 0 then notes[#notes + 1] = "Could not re-allocate: " .. table.concat(failed, ", ") end
+	if routed > 0 then notes[#notes + 1] = ("Kept the original %d-node route to %d distance-scaling jewel(s) (Split Personality)"):format(routed, #routes) end
+	local missing = {}
+	for id, name in pairs(failed) do
+		if not (spec.nodes[id] and spec.nodes[id].alloc) then missing[#missing + 1] = name end
+	end
+	if #missing > 0 then notes[#notes + 1] = "Could not re-allocate: " .. table.concat(missing, ", ") end
 end
 
 function EDIT.equip_timeless(e, notes)
@@ -1994,6 +2103,8 @@ local function lnsImprove(p, res, protected)
 	local rounds, kept = p.lns_rounds or 0, {}
 	local deadline = os.clock() + (p.lns_seconds or 120)
 	local current = feasible(output()) and value(output()) or nil
+	local best, bestState = current or -math.huge, nil
+	math.randomseed(p.seed or 1)
 	local seed = 0
 	for round = 1, rounds do
 		if os.clock() > deadline or not current then break end
@@ -2006,16 +2117,17 @@ local function lnsImprove(p, res, protected)
 				local rm = {}
 				for _, n in pairs(set) do rm[n] = true end
 				branches[#branches + 1] = { leaf = node, set = set, cost = cost,
-					loss = -value(calcFunc({ removeNodes = rm }, false)) }
+					loss = -value(calcWithRemoval(calcFunc, { removeNodes = rm }, false)) }
 			end
 		end
 		if #branches == 0 then break end
 		table.sort(branches, function(a, b) return a.loss < b.loss end)
 		-- remove k of the cheapest branches, varying which ones each round
 		seed = seed + 1
-		local k = 1 + (round % math.min(5, #branches))
+		local k = 1 + (round % math.min(p.lns_max_drop or 5, #branches))
 		local pool = math.min(#branches, k + 4)
 		local state = spec:CreateUndoState()
+		local countBefore = spec:CountAllocNodes()
 		local freed, removed = 0, {}
 		for i = 1, pool do
 			if #removed >= k then break end
@@ -2031,6 +2143,8 @@ local function lnsImprove(p, res, protected)
 		end
 		spec:BuildAllDependsAndPaths()
 		rebuild()
+		-- count what actually came off: deallocating can take dependent nodes with it
+		freed = countBefore - spec:CountAllocNodes()
 		local q = {}
 		for kk, v in pairs(p) do q[kk] = v end
 		q.points, q.lns_rounds, q.refine, q.anoint = freed, 0, true, false
@@ -2038,8 +2152,16 @@ local function lnsImprove(p, res, protected)
 		local ok = pcall(autoAllocate, q)
 		local out = output()
 		local v = feasible(out) and value(out) or nil
-		if ok and v and v > current + 0.05 then
-			kept[#kept + 1] = { round = round, removed = removed, gainPct = math.floor((v - current) * 100 + 0.5) / 100 }
+		-- lns_temperature > 0 (in % of the weighted score) also accepts some worse feasible
+		-- trees early on, to leave a plateau; the best tree seen is restored at the end
+		local temp = (p.lns_temperature or 0) * (1 - round / rounds)
+		local sideways = ok and v and temp > 0 and v <= current + 0.05 and math.random() < math.exp((v - current) / temp)
+		if ok and v and (v > current + 0.05 or sideways) then
+			if v > best + 0.05 then
+				kept[#kept + 1] = { round = round, removed = removed, gainPct = math.floor((v - best) * 100 + 0.5) / 100 }
+				best = v
+				bestState = spec:CreateUndoState()
+			end
 			current = v
 		else
 			spec:RestoreUndoState(state)
@@ -2047,16 +2169,158 @@ local function lnsImprove(p, res, protected)
 			rebuild()
 		end
 	end
+	if bestState and current < best then
+		spec:RestoreUndoState(bestState)
+		spec:BuildAllDependsAndPaths()
+		rebuild()
+	end
 	return kept
+end
+
+-- Remove the cheapest branches the optimiser added (lowest weighted loss per point) until
+-- about `points` points are free; returns the points actually freed
+local function dropCheapBranches(points, protected, weights)
+	local build = B()
+	local spec = build.spec
+	local calcFunc, base = build.calcsTab:GetMiscCalculator()
+	local bases = {}
+	for stat in pairs(weights) do bases[stat] = readStat(base, stat) end
+	local function allocNeighbours(node, exclude)
+		local n = {}
+		for _, other in ipairs(node.linked) do
+			if other.alloc and not (exclude and exclude[other.id]) then n[#n + 1] = other end
+		end
+		return n
+	end
+	local branches = {}
+	for id, node in pairs(spec.allocNodes) do
+		if not protected[id] and not node.ascendancyName and node.type ~= "ClassStart" and id < 65536
+			and #allocNeighbours(node) == 1 then
+			local set, cost, cur = { [node.id] = node }, 1, node
+			while true do
+				local nb = allocNeighbours(cur, set)
+				if #nb ~= 1 then break end
+				local nxt = nb[1]
+				if protected[nxt.id] or nxt.type == "Notable" or nxt.type == "Keystone" or nxt.type == "Socket"
+					or nxt.type == "ClassStart" or nxt.ascendancyName or #allocNeighbours(nxt, set) ~= 2 then break end
+				set[nxt.id] = nxt
+				cost = cost + 1
+				cur = nxt
+			end
+			local rm = {}
+			for _, n in pairs(set) do rm[n] = true end
+			local loss = -weightedScore(weights, bases, calcWithRemoval(calcFunc, { removeNodes = rm }, false))
+			branches[#branches + 1] = { leaf = node, set = set, perPoint = loss / cost }
+		end
+	end
+	table.sort(branches, function(a, b) return a.perPoint < b.perPoint end)
+	local before = spec:CountAllocNodes()
+	for _, b in ipairs(branches) do
+		if before - spec:CountAllocNodes() >= points then break end
+		if b.leaf.alloc then
+			spec:DeallocNode(b.leaf)
+			for _, n in pairs(b.set) do if n.alloc then spec:DeallocNode(n) end end
+		end
+	end
+	spec:BuildAllDependsAndPaths()
+	rebuild()
+	return before - spec:CountAllocNodes()
 end
 
 function API.auto_allocate(p)
 	local mainAtStart = B().skillsTab.socketGroupList[B().mainSocketGroup]
+	local countAtStart = B().spec:CountAllocNodes()
 	local protected = {}
 	for id in pairs(B().spec.allocNodes) do protected[id] = true end
-	local ok, res = pcall(autoAllocate, p)
+	local ok, res
+	if p.target_mode == "slack" and p.targets and next(p.targets) then
+		-- slack estimates can be optimistic: retry with a wider margin, then targets-first
+		local spec = B().spec
+		local start = spec:CreateUndoState()
+		local tries = {}
+		for _, m in ipairs({ p.slack_margin or 1.25, (p.slack_margin or 1.25) * 2, (p.slack_margin or 1.25) * 4, false }) do
+			local q = {}
+			for k, v in pairs(p) do q[k] = v end
+			if m then q.slack_margin = m else q.target_mode = "first" end
+			ok, res = pcall(autoAllocate, q)
+			if not ok then break end
+			local met = true
+			for _, row in pairs(res.targets or {}) do met = met and row.met end
+			for _, row in pairs(res.validity or {}) do met = met and row.met end
+			tries[#tries + 1] = { margin = m or "targets-first", targetsMet = met }
+			if met or m == false then break end
+			spec:RestoreUndoState(start)
+			spec:BuildAllDependsAndPaths()
+			rebuild()
+		end
+		if ok then res.slackTries = tries end
+	elseif p.target_mode == "repair" and p.targets and next(p.targets) then
+		-- damage first with the whole budget, then trade the cheapest damage branches for
+		-- the targets until every target is met
+		local spec = B().spec
+		local start = spec:CreateUndoState()
+		local q = {}
+		for k, v in pairs(p) do q[k] = v end
+		q.targets, q.target_mode, q.anoint = {}, "first", false
+		ok, res = pcall(autoAllocate, q)
+		local function feasible()
+			local out = output()
+			for stat, t in pairs(p.targets) do if (readStat(out, stat) or 0) < tonumber(t) then return false end end
+			for stat, row in pairs(res.validity or {}) do if (readStat(out, stat) or 0) < row.target then return false end end
+			return true
+		end
+		local rounds, budget = 0, p.points or 0
+		local step = math.max(3, math.floor(budget * 0.1))
+		while ok and not feasible() and rounds < (p.repair_rounds or 15) do
+			rounds = rounds + 1
+			local freed = dropCheapBranches(step, protected, res.weights)
+			if freed <= 0 then break end
+			local r = {}
+			for k, v in pairs(p) do r[k] = v end
+			r.points, r.target_mode, r.lns_rounds, r.anoint = freed, "first", 0, false
+			r.max_seconds = math.min(p.max_seconds or 40, 40)
+			pcall(autoAllocate, r)
+		end
+		if ok and not feasible() then
+			-- could not repair: fall back to targets-first from the start
+			spec:RestoreUndoState(start)
+			spec:BuildAllDependsAndPaths()
+			rebuild()
+			local r = {}
+			for k, v in pairs(p) do r[k] = v end
+			r.target_mode = "first"
+			ok, res = pcall(autoAllocate, r)
+			if ok then res.repair = { rounds = rounds, fellBack = true } end
+		elseif ok then
+			res.repair = { rounds = rounds }
+		end
+		if ok then
+			-- report the final state against the real targets
+			local out = output()
+			res.targets = {}
+			for stat, t in pairs(p.targets) do
+				local v = readStat(out, stat) or 0
+				res.targets[stat] = { target = tonumber(t), value = num(v), met = v >= tonumber(t) }
+			end
+			for stat, row in pairs(res.validity or {}) do
+				local v = readStat(out, stat) or 0
+				row.value, row.met = num(v), v >= row.target
+			end
+		end
+	else
+		ok, res = pcall(autoAllocate, p)
+	end
 	if ok and (p.lns_rounds or 0) > 0 then
 		local ok2, kept = pcall(lnsImprove, p, res, protected)
+		-- spend anything a round left over
+		local left = (p.points or 0) - (B().spec:CountAllocNodes() - countAtStart)
+		if ok2 and p.points and left > 0 then
+			local q = {}
+			for k, v in pairs(p) do q[k] = v end
+			q.points, q.lns_rounds, q.anoint = left, 0, false
+			q.max_seconds = math.min(p.max_seconds or 40, 60)
+			pcall(autoAllocate, q)
+		end
 		if ok2 then
 			res.lns = kept
 			local after = {}
@@ -2077,6 +2341,7 @@ function API.auto_allocate(p)
 		end
 		B().spec:AddUndoState()
 	end
+	for _, node in pairs(B().spec.allocNodes) do keepRunegraft(node) end
 	keepMainGroup(mainAtStart)
 	if not ok then error(res, 0) end
 	return res
@@ -2085,6 +2350,73 @@ end
 function autoAllocate(p)
 	local build = B()
 	local spec = build.spec
+	-- Nodes an Intuitive Leap-like jewel (Impossible Escape, Thread of Hope) covers are
+	-- allocated on their own, without the path PoB still reports for them
+	local function P(node)
+		if not node.path then return nil end
+		if node.intuitiveLeapLikesAffecting and #node.intuitiveLeapLikesAffecting > 0 then return { node } end
+		return node.path
+	end
+	-- Jewels like Unnatural Instinct reward leaving small passives in their radius unallocated,
+	-- but PoB's shortest path may run straight through them. For those, a second route that
+	-- avoids the radius is computed and the better of the two is used.
+	local function radiusAvoidSet()
+		local avoidSet, any = {}, false
+		for id, node in pairs(spec.allocNodes) do
+			if node.type == "Socket" then
+				local slot = build.itemsTab.slots["Jewel " .. id]
+				local item = slot and build.itemsTab.items[slot.selItemId]
+				local wantsUnalloc = false
+				if item then
+					for _, ml in ipairs(item.explicitModLines or {}) do
+						if (ml.line or ""):find("Unallocated") then wantsUnalloc = true break end
+					end
+				end
+				local radius = wantsUnalloc and item.jewelRadiusIndex and node.nodesInRadius and node.nodesInRadius[item.jewelRadiusIndex]
+				if radius then
+					for nid, n in pairs(radius) do
+						if n.type == "Normal" and not n.alloc then avoidSet[nid] = true any = true end
+					end
+				end
+			end
+		end
+		return any and avoidSet or nil
+	end
+	local function altPaths(avoidSet)
+		-- Dijkstra from the allocated tree; a small passive in an avoided radius costs 1.5
+		local dist, prev, buckets = {}, {}, {}
+		local function push(n, d) buckets[d] = buckets[d] or {} table.insert(buckets[d], n) end
+		for _, n in pairs(spec.allocNodes) do
+			if not (n.intuitiveLeapLikesAffecting and #n.intuitiveLeapLikesAffecting > 0 and not n.connectedToStart) then
+				dist[n.id] = 0 push(n, 0)
+			end
+		end
+		local maxD = ((p.max_path_cost or 6) + 2) * 2
+		for d = 0, maxD do
+			local list = buckets[d]
+			local i = 1
+			while list and i <= #list do
+				local node = list[i]; i = i + 1
+				if dist[node.id] == d then
+					for _, other in ipairs(node.linked) do
+						if not other.alloc and node.type ~= "Mastery" and other.type ~= "ClassStart" and other.type ~= "AscendClassStart"
+							and not other.ascendancyName and not node.ascendancyName then
+							local nd = d + (avoidSet[other.id] and 3 or 2)
+							if nd <= maxD and (dist[other.id] == nil or nd < dist[other.id]) then
+								dist[other.id] = nd prev[other.id] = node push(other, nd)
+							end
+						end
+					end
+				end
+			end
+		end
+		return function(node)
+			if not dist[node.id] or node.alloc then return nil end
+			local path, cur = {}, node
+			while cur and not cur.alloc do path[#path + 1] = cur cur = prev[cur.id] end
+			return path
+		end
+	end
 	local itemsTab = build.itemsTab
 	local weights = p.weights
 	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
@@ -2163,6 +2495,10 @@ function autoAllocate(p)
 		end
 		return list
 	end
+	-- target_mode "slack": spend on the weighted stats while the points left exceed what the
+	-- targets still need (estimated from the best target progress per point seen last step)
+	local slackMode, bestTargetRate = false, nil
+	local useSlack = p.target_mode == "slack"
 	local function scoreOut(bases, baseUnmet, out)
 		local ws = weightedScore(weights, bases, out)
 		if not targetsGivenUp and next(baseUnmet) then
@@ -2171,6 +2507,12 @@ function autoAllocate(p)
 				local t = targets[stat]
 				local v = math.min(readStat(out, stat) or 0, t)
 				ts = ts + (v - bv) / (t - bv) * 100
+			end
+			if slackMode then
+				-- enough spare points to still reach the targets later: chase the weighted
+				-- stats now, but never with a node that moves the targets backwards
+				if ts < -1e-9 then return -math.huge, ts end
+				return ws + ts * 1e-3, ts
 			end
 			if p.target_weight then
 				-- blended: damage and progress toward the targets both count
@@ -2188,10 +2530,20 @@ function autoAllocate(p)
 	local refreshEvery = p.refresh_every or 4
 	local step, stale, targetsChanged = 0, {}, false
 	local lastUnmetCount
+	local grace = false
 	while spent < budget do
 		if os.clock() > deadline then
-			stopReason = "time limit reached; progress is kept, call auto_allocate again to continue"
-			break
+			if not grace and p.finish ~= false then
+				-- out of time with points left: finish quickly on the estimates already made
+				-- (no full refreshes, short exact shortlist) rather than leave points unspent
+				grace = true
+				deadline = os.clock() + math.max(10, (p.max_seconds or 40) * 0.25)
+				shortlist = math.min(shortlist, 4)
+				refreshEvery = math.huge
+			else
+				stopReason = "time limit reached; progress is kept, call auto_allocate again to continue"
+				break
+			end
 		end
 		local calcFunc, base = build.calcsTab:GetMiscCalculator()
 		granted = build.calcsTab.mainEnv.grantedPassives or {}
@@ -2204,18 +2556,29 @@ function autoAllocate(p)
 		targetsChanged = lastUnmetCount ~= nil and unmetCount ~= lastUnmetCount
 		lastUnmetCount = unmetCount
 		local remaining = budget - spent
+		if useSlack and unmetCount > 0 and not targetsGivenUp then
+			-- ts sums the share (in %) of each unmet target's gap a node closes
+			local needed = bestTargetRate and bestTargetRate > 0 and (100 * unmetCount / bestTargetRate) or math.huge
+			local want = remaining > needed * (p.slack_margin or 1.25) + 1
+			if want ~= slackMode then slackMode = want targetsChanged = true end
+		elseif slackMode then
+			slackMode = false targetsChanged = true
+		end
 		local useFull = weights.FullDPS ~= nil
 
 		-- Pass 1: node on its own (cached by identical mods), normalised by path cost.
 		-- Between full refreshes, estimates from earlier steps are reused (pass 2 is exact).
 		step = step + 1
-		local refresh = (not fast) or step % refreshEvery == 1 or targetsChanged
+		local refresh = (not fast and not grace) or (refreshEvery ~= math.huge and step % refreshEvery == 1) or (targetsChanged and not grace)
 		if refresh then stale = {} end
 		local cands, cache = {}, {}
+		local stepRate
 		for _, node in pairs(spec.nodes) do
-			if not node.alloc and node.path and #node.path > 0 and #node.path <= math.min(maxCost, remaining)
+			if not node.alloc and P(node) and #P(node) > 0 and #P(node) <= math.min(maxCost, remaining)
 				and node.dn and node.modKey ~= "" and not granted[node.id] and not node.ascendancyName
 				and (node.type == "Notable" or (p.include_keystones and node.type == "Keystone")
+					-- a runegraft sits on a mastery node but is one fixed modifier
+					or (node.type == "Mastery" and node.overrideType == "AlternateMastery")
 					or (includeSmall and node.type == "Normal"))
 				and not avoid[node.dn:lower()] then
 				local key = node.modKey
@@ -2223,30 +2586,34 @@ function autoAllocate(p)
 					if stale[key] ~= nil then
 						cache[key] = stale[key]
 					else
-						cache[key] = scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
-						stale[key] = cache[key]
+						local sc, ts = scoreOut(bases, baseUnmet, calcFunc({ addNodes = { [node] = true } }, useFull))
+						cache[key] = sc
+						stale[key] = sc
+						if ts then stale["ts" .. key] = ts end
 					end
 				end
-				cands[#cands + 1] = { node = node, est = cache[key] / #node.path }
+				local ts = stale["ts" .. key]
+				if useSlack and ts and (not stepRate or ts / #P(node) > stepRate) then stepRate = ts / #P(node) end
+				cands[#cands + 1] = { node = node, est = cache[key] / #P(node) }
 			end
 		end
 		if useMasteries and remaining >= 1 then
 			for _, node in pairs(spec.nodes) do
-				if node.type == "Mastery" and not node.alloc and node.path and #node.path >= 1
-					and #node.path <= math.min(p.mastery_reach or 4, maxCost, remaining)
+				if node.type == "Mastery" and node.overrideType ~= "AlternateMastery" and not node.alloc and P(node) and #P(node) >= 1
+					and #P(node) <= math.min(p.mastery_reach or 6, maxCost, remaining)
 					and node.masteryEffects and #node.masteryEffects > 0 and not avoid[(node.dn or ""):lower()] then
 					-- a mastery further away is scored with the path that reaches it
 					local set = {}
-					for _, pn in ipairs(node.path) do set[pn] = true end
+					for _, pn in ipairs(P(node)) do set[pn] = true end
 					for _, opt in ipairs(masteryOptions(node)) do
 						if opt.available then
-							local mkey = "m" .. node.id .. ":" .. opt.effectId .. ":" .. #node.path
+							local mkey = "m" .. node.id .. ":" .. opt.effectId .. ":" .. #P(node)
 							local sc = stale[mkey]
 							if sc == nil then
 								sc = withMastery(node, opt.effectId, function()
 									return scoreOut(bases, baseUnmet, calcFunc({ addNodes = set }, useFull))
 								end)
-								sc = sc / #node.path
+								sc = sc / #P(node)
 								stale[mkey] = sc
 							end
 							cands[#cands + 1] = { node = node, est = sc, mastery = opt.effectId, text = opt.text }
@@ -2260,7 +2627,7 @@ function autoAllocate(p)
 		if p.bundles ~= false then
 			local groups = {}
 			for _, node in pairs(spec.nodes) do
-				if node.type == "Notable" and not node.alloc and node.group and node.path and #node.path > 0
+				if node.type == "Notable" and not node.alloc and node.group and P(node) and #P(node) > 0
 					and not node.ascendancyName and not node.isProxy and not avoid[(node.dn or ""):lower()] then
 					groups[node.group] = groups[node.group] or {}
 					table.insert(groups[node.group], node)
@@ -2270,7 +2637,7 @@ function autoAllocate(p)
 				if #members >= 2 then
 					local set, cost = {}, 0
 					for _, m in ipairs(members) do
-						for _, pn in ipairs(m.path) do
+						for _, pn in ipairs(P(m)) do
 							if not set[pn] then set[pn] = true cost = cost + 1 end
 						end
 					end
@@ -2285,21 +2652,24 @@ function autoAllocate(p)
 		local jewel = jewelItems[nextJewel]
 		if jewel then
 			for _, node in pairs(spec.nodes) do
-				if node.type == "Socket" and not node.alloc and not node.ascendancyName and not node.isProxy and node.path and #node.path > 0
-					and #node.path <= math.min(maxCost, remaining) and itemsTab.slots["Jewel " .. node.id] then
+				if node.type == "Socket" and not node.alloc and not node.ascendancyName and not node.isProxy and P(node) and #P(node) > 0
+					and #P(node) <= math.min(maxCost, remaining) and itemsTab.slots["Jewel " .. node.id] then
 					local set = {}
-					for _, pn in ipairs(node.path) do set[pn] = true end
+					for _, pn in ipairs(P(node)) do set[pn] = true end
 					local sc = scoreOut(bases, baseUnmet, calcFunc({ addNodes = set,
 						repSlotName = "Jewel " .. node.id, repItem = jewel }, useFull))
-					cands[#cands + 1] = { node = node, est = sc / #node.path, jewel = true, exact = sc / #node.path }
+					cands[#cands + 1] = { node = node, est = sc / #P(node), jewel = true, exact = sc / #P(node) }
 				end
 			end
 		end
 		if #cands == 0 then stopReason = "no reachable candidates within budget" break end
+		if useSlack and next(baseUnmet) then bestTargetRate = stepRate end
 		table.sort(cands, function(a, b) return a.est > b.est end)
 
 		-- Pass 2: exact value of the whole path for the shortlist
 		local best, bestScore, bestTarget, bestCand
+		local avoidSet = p.reroute ~= false and radiusAvoidSet() or nil
+		local altOf = avoidSet and altPaths(avoidSet) or nil
 		for i = 1, math.min(shortlist, #cands) do
 			local c = cands[i]
 			local node = c.node
@@ -2309,22 +2679,36 @@ function autoAllocate(p)
 				sc = sc / c.bundleCost
 			elseif c.mastery then
 				local set = {}
-				for _, pn in ipairs(node.path) do set[pn] = true end
+				for _, pn in ipairs(P(node)) do set[pn] = true end
 				sc, ts = withMastery(node, c.mastery, function()
 					return scoreOut(bases, baseUnmet, calcFunc({ addNodes = set }, useFull))
 				end)
-				sc = sc / #node.path
+				sc = sc / #P(node)
 			else
 				local set = {}
-				for _, pn in ipairs(node.path) do set[pn] = true end
+				for _, pn in ipairs(P(node)) do set[pn] = true end
 				local override = { addNodes = set }
 				if c.jewel then override.repSlotName, override.repItem = "Jewel " .. node.id, jewel end
 				sc, ts = scoreOut(bases, baseUnmet, calcFunc(override, useFull))
-				sc = sc / #node.path
+				sc = sc / #P(node)
+				c.usePath = nil
+				local alt = altOf and P(node) == node.path and altOf(node)
+				if alt and #alt > 0 and #alt <= math.min(maxCost, remaining) then
+					local differs = #alt ~= #node.path
+					local aset = {}
+					for _, pn in ipairs(alt) do aset[pn] = true if not set[pn] then differs = true end end
+					if differs then
+						local o2 = { addNodes = aset }
+						if c.jewel then o2.repSlotName, o2.repItem = "Jewel " .. node.id, jewel end
+						local sc2, ts2 = scoreOut(bases, baseUnmet, calcFunc(o2, useFull))
+						sc2 = sc2 / #alt
+						if sc2 > sc then sc, ts, c.usePath = sc2, ts2, alt end
+					end
+				end
 			end
 			if not bestScore or sc > bestScore then best, bestScore, bestTarget, bestCand = node, sc, ts, c end
 		end
-		if not targetsGivenUp and next(baseUnmet) and (not best or (bestTarget or 0) <= 0) then
+		if not targetsGivenUp and not slackMode and next(baseUnmet) and (not best or (bestTarget or 0) <= 0) then
 			-- Nothing on the tree moves the unmet targets: carry on with the weights only
 			targetsGivenUp = true
 			stale = {}
@@ -2332,7 +2716,7 @@ function autoAllocate(p)
 		end
 		if not best or bestScore <= 0 then stopReason = "no remaining node improves the weighted stats" break end
 
-		local cost = bestCand.members and bestCand.bundleCost or #best.path
+		local cost = bestCand.members and bestCand.bundleCost or (bestCand.usePath and #bestCand.usePath) or #P(best)
 		local extra
 		if bestCand.members then
 			local names = {}
@@ -2346,7 +2730,9 @@ function autoAllocate(p)
 			EDIT.set_mastery({ node = best.id, effect = bestCand.mastery }, {})
 			extra = bestCand.text
 		else
-			spec:AllocNode(best)
+			spec:AllocNode(best, bestCand.usePath)
+			if bestCand.usePath then spec:BuildAllDependsAndPaths() end
+			keepRunegraft(best)
 			if bestCand.jewel then
 				rebuild()
 				equipParsed(jewel, "Jewel " .. best.id, {})
@@ -2364,7 +2750,7 @@ function autoAllocate(p)
 			end
 		end
 		chosen[#chosen + 1] = { name = best.dn, type = best.type, cost = cost, effect = extra, check = drawback,
-			forTargets = (not targetsGivenUp and next(baseUnmet) ~= nil) or nil,
+			forTargets = (not targetsGivenUp and not slackMode and next(baseUnmet) ~= nil) or nil,
 			scorePerPoint = math.floor(bestScore * 100 + 0.5) / 100 }
 		::continue::
 	end
@@ -2429,7 +2815,7 @@ function autoAllocate(p)
 					local set, cost = branchOf(node)
 					local rm = {}
 					for _, n in pairs(set) do rm[n] = true end
-					local out = calcFunc({ removeNodes = rm }, useFull)
+					local out = calcWithRemoval(calcFunc, { removeNodes = rm }, useFull)
 					local loss = -weightedScore(weights, bases2, out)
 					removals[#removals + 1] = { leaf = node, set = set, cost = cost, loss = loss, ok = meetsTargets(out) }
 				end
@@ -2476,7 +2862,7 @@ function autoAllocate(p)
 					for _, pn in ipairs(node.path) do addSet[pn] = true end
 					local rm = {}
 					for _, n in pairs(union) do rm[n] = true end
-					local out = calcFunc({ removeNodes = rm, addNodes = addSet }, useFull)
+					local out = calcWithRemoval(calcFunc, { removeNodes = rm, addNodes = addSet }, useFull)
 					if meetsTargets(out) then
 						local gain = weightedScore(weights, bases2, out)
 						if gain > 0.05 and (not best or gain > best.gain) then
@@ -2697,7 +3083,7 @@ function API.tree_map(p)
 			local m = adjacentMastery(node)
 			if m then v.mastery = m.dn end
 			if inRegion then v.distance = inRegion[id] end
-			if node.path and not node.alloc then v.pathCost = #node.path end
+			if node.path and not node.alloc then v.pathCost = pathCostOf(node) end
 			vlist[#vlist + 1] = v
 		end
 	end
@@ -4414,7 +4800,7 @@ function API.keystones()
 	for _, node in pairs(spec.nodes) do
 		if node.type == "Keystone" and not node.ascendancyName and not node.isProxy and not node.expansionSkill then
 			res[#res + 1] = { name = node.dn, stats = node.sd, allocated = node.alloc or nil,
-				pathCost = (not node.alloc and node.path) and #node.path or nil }
+				pathCost = (not node.alloc and node.path) and pathCostOf(node) or nil }
 		end
 	end
 	table.sort(res, function(a, b) return a.name < b.name end)

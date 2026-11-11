@@ -2,6 +2,16 @@
 
 ## 0.4.0
 
+Optimiser and tree fixes (from the tree-rebuild benchmark, now 17/19 matches)
+- `auto_allocate_passives`: `target_mode` "slack" and "repair"; masteries up to 6 points
+  away; default `max_path_cost` 10; Impossible Escape / Thread of Hope nodes cost 1 point;
+  runegrafts are candidates and are saved; routes that avoid Unnatural Instinct radii; a
+  short finishing pass instead of leaving points unspent at the time limit; LNS counts freed
+  points correctly and spends leftovers.
+- `reset_tree` keeps jewels in cluster-jewel sockets and the route to Split Personality.
+- `get_passive_tree`: `distanceJewels`, and `include_nodes` to list every allocated node.
+- `rank_passives(mode="remove")` no longer crashes on builds with runegrafts.
+
 New tools
 - `load_ladder_build`: load a real poe.ninja ladder character (random, top, by rank, or by
   account and character), filtered by ascendancy and/or main skill. Random picks skip

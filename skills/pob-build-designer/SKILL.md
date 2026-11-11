@@ -133,6 +133,10 @@ Equip what a player at the target budget would really own (gear-and-progression.
    "LightningMaximumHitTaken": 30000}` for T16 mapping): it closes those gaps first,
    then spends the rest on the weights without breaking them. If it reports a target
    it could not reach, the gap has to come from gear, flasks, gems or config.
+   Avoidance layers that only pay off at their cap need their own target: spell
+   suppression halves spell hits only at 100%, so one suppression node shows no gain and
+   the optimiser never starts on it. Add `"SpellSuppressionChance": 100` (or a
+   `BlockChance` / `SpellBlockChance` level) when the build is meant to have that layer.
    Targets cost damage. When the defense targets eat most of the tree, run the optimiser
    on fresh tree specs (`add_tree_spec` with `copy: false`; check `ascendancyPointsUsed`
    afterwards and re-allocate the ascendancy if needed) at two or three target levels
@@ -145,6 +149,11 @@ Equip what a player at the target budget would really own (gear-and-progression.
    `anoint: true` anoints the amulet at the end without breaking mana or reservation.
    Planned rare jewels and masteries were worth about 2x boss DPS at the same defense
    targets in testing, so use them.
+   When the damage nodes also feed the targets (strength, life or attribute stacking),
+   try `target_mode: "slack"` as well: it chases damage while there are spare points and
+   only turns to the targets when the points left get tight; compare it with the default.
+   Split Personality grows with the socket's distance from the class start
+   (`get_passive_tree` shows it under `distanceJewels`), so a shorter route weakens it.
    For tight builds (several targets close together), pass `lns_rounds: 15`: it drops the
    weakest branches and refills them, which is how the best rebuilds in testing were found.
    If time allows, repeat it yourself: deallocate 1-5 low-value notables, rerun the

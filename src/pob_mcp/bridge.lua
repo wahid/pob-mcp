@@ -2100,8 +2100,70 @@ local function lnsImprove(p, res, protected)
 		end
 		return set, cost
 	end
+	-- progress toward the targets: each target as a share of its minimum, capped just above 1
+	local function targetProgress(out)
+		local s = 0
+		for stat, t in pairs(targets) do
+			local v = readStat(out, stat) or 0
+			if t > 0 then s = s + math.min(v / t, 1.02) elseif v >= t then s = s + 1 end
+		end
+		return s
+	end
+	local function setEffect(node, effectId)
+		local eff = spec.tree.masteryEffects[effectId]
+		node.sd = eff.sd
+		node.allMasteryOptions = false
+		spec.tree:ProcessStats(node)
+		spec.masterySelections[node.id] = effectId
+	end
+	-- Re-pick the effects of allocated masteries. A swap costs no points, but the greedy fixes
+	-- each effect when it allocates the mastery and never looks again. mode "value": keep a
+	-- swap that stays feasible and raises the weighted score. mode "targets": move toward the
+	-- targets (after a drop, so the refill needs fewer points for them)
+	local function repickMasteries(mode)
+		local swaps = 0
+		for id, node in pairs(spec.allocNodes) do
+			if node.type == "Mastery" and node.masteryEffects and #node.masteryEffects > 1
+				and node.overrideType ~= "AlternateMastery" and not protected[id] and id < 65536 then
+				local cur = spec.masterySelections[id]
+				local out = output()
+				local bestA, bestB, bestEff
+				if mode == "value" then
+					bestA = feasible(out) and value(out) or nil
+				else
+					bestA, bestB = targetProgress(out), value(out)
+				end
+				if bestA then
+					for _, opt in ipairs(masteryOptions(node)) do
+						if opt.available and opt.effectId ~= cur then
+							setEffect(node, opt.effectId)
+							rebuild()
+							local o = output()
+							if mode == "value" then
+								local v = feasible(o) and value(o) or nil
+								if v and v > bestA + 0.05 then bestA, bestEff = v, opt.effectId end
+							else
+								local a, b = targetProgress(o), value(o)
+								if a > bestA + 1e-4 or (math.abs(a - bestA) <= 1e-4 and b > bestB + 0.05) then
+									bestA, bestB, bestEff = a, b, opt.effectId
+								end
+							end
+						end
+					end
+					setEffect(node, bestEff or cur)
+					rebuild()
+					if bestEff then swaps = swaps + 1 end
+				end
+			end
+		end
+		return swaps
+	end
 	local rounds, kept = p.lns_rounds or 0, {}
 	local deadline = os.clock() + (p.lns_seconds or 120)
+	if p.lns_repick ~= false and feasible(output()) then
+		local n = repickMasteries("value")
+		if n > 0 then kept[#kept + 1] = { round = 0, masterySwaps = n } end
+	end
 	local current = feasible(output()) and value(output()) or nil
 	local best, bestState = current or -math.huge, nil
 	math.randomseed(p.seed or 1)
@@ -2122,6 +2184,14 @@ local function lnsImprove(p, res, protected)
 		end
 		if #branches == 0 then break end
 		table.sort(branches, function(a, b) return a.loss < b.loss end)
+		-- every third round drops a random set instead of the cheapest: the cheapest branches
+		-- are usually the ones holding the targets, and the refill just puts them back
+		if (p.lns_drop or "mixed") == "mixed" and round % 3 == 0 then
+			for i = #branches, 2, -1 do
+				local j = math.random(i)
+				branches[i], branches[j] = branches[j], branches[i]
+			end
+		end
 		-- remove k of the cheapest branches, varying which ones each round
 		seed = seed + 1
 		local k = 1 + (round % math.min(p.lns_max_drop or 5, #branches))
@@ -2145,6 +2215,7 @@ local function lnsImprove(p, res, protected)
 		rebuild()
 		-- count what actually came off: deallocating can take dependent nodes with it
 		freed = countBefore - spec:CountAllocNodes()
+		if p.lns_repick ~= false then repickMasteries("targets") end
 		local q = {}
 		for kk, v in pairs(p) do q[kk] = v end
 		q.points, q.lns_rounds, q.refine, q.anoint = freed, 0, true, false
@@ -2163,6 +2234,10 @@ local function lnsImprove(p, res, protected)
 				bestState = spec:CreateUndoState()
 			end
 			current = v
+			if p.lns_repick ~= false and repickMasteries("value") > 0 then
+				current = value(output())
+				if current > best + 0.05 then best = current bestState = spec:CreateUndoState() end
+			end
 		else
 			spec:RestoreUndoState(state)
 			spec:BuildAllDependsAndPaths()

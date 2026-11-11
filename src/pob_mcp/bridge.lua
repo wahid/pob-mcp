@@ -2165,7 +2165,14 @@ local function lnsImprove(p, res, protected)
 		local n = repickMasteries("value")
 		if n > 0 then kept[#kept + 1] = { round = 0, masterySwaps = n } end
 	end
-	local current = feasible(output()) and value(output()) or nil
+	-- lns_infeasible: also search from a tree that misses a target. Infeasible trees score
+	-- far below any feasible one, ranked by how close they get to the targets
+	local function score(out)
+		if feasible(out) then return value(out) end
+		if p.lns_infeasible then return -1e9 + targetProgress(out) * 1e6 end
+		return nil
+	end
+	local current = score(output())
 	-- start from the tree as given: with lns_temperature, accepted sideways moves can leave
 	-- the search on a worse tree, and it must still end on the best one it saw
 	local best, bestState = current or -math.huge, current and spec:CreateUndoState() or nil
@@ -2290,7 +2297,7 @@ local function lnsImprove(p, res, protected)
 			-- or a refill of the very same nodes scores lower than the tree it came from
 			if okR and p.lns_repick ~= false then repickMasteries("value") end
 			local o = output()
-			local vR = okR and feasible(o) and value(o) or nil
+			local vR = okR and score(o) or nil
 			if p.lns_debug then
 				local unmet = {}
 				for stat, t in pairs(targets) do
@@ -2328,8 +2335,8 @@ local function lnsImprove(p, res, protected)
 				bestState = spec:CreateUndoState()
 			end
 			current = v
-			if p.lns_repick ~= false and repickMasteries("value") > 0 then
-				current = value(output())
+			if p.lns_repick ~= false and feasible(output()) and repickMasteries("value") > 0 then
+				current = score(output()) or current
 				if current > best + 0.05 then best = current bestState = spec:CreateUndoState() end
 			end
 		else
@@ -2400,7 +2407,14 @@ function API.auto_allocate(p)
 	local mainAtStart = B().skillsTab.socketGroupList[B().mainSocketGroup]
 	local countAtStart = B().spec:CountAllocNodes()
 	local protected = {}
+	-- lns_keep: nodes (names or ids) that stay fixed even with lns_from_current
+	local keep = {}
+	for _, ref in ipairs(p.lns_keep or {}) do
+		local n = resolveNode(ref)
+		if n then keep[n.id] = true end
+	end
 	for id, node in pairs(B().spec.allocNodes) do
+		if keep[id] then protected[id] = true end
 		-- lns_from_current: improve the tree as it is; only the picks reset_tree keeps
 		-- (ascendancy, keystones, jewel sockets) are fixed, every other node may be dropped
 		if not p.lns_from_current or node.ascendancyName or node.type == "Keystone"

@@ -2159,6 +2159,7 @@ local function lnsImprove(p, res, protected)
 		return swaps
 	end
 	local rounds, kept = p.lns_rounds or 0, {}
+	local debugLog = {}
 	local deadline = os.clock() + (p.lns_seconds or 120)
 	if p.lns_repick ~= false and feasible(output()) then
 		local n = repickMasteries("value")
@@ -2225,6 +2226,7 @@ local function lnsImprove(p, res, protected)
 		-- the tree that was just dropped; randomised ones can swap a group of notables at once
 		local refills = p.lns_refills or 1
 		local dropped = spec:CreateUndoState()
+		local droppedValue = value(output())
 		local ok, v, bestFill
 		for r = 1, refills do
 			if r > 1 then
@@ -2233,9 +2235,26 @@ local function lnsImprove(p, res, protected)
 				rebuild()
 				q.pick_noise = p.lns_noise or 0.3
 			end
-			local okR = pcall(autoAllocate, q)
+			local okR, resR = pcall(autoAllocate, q)
+			-- the greedy picks a mastery's effect for the step it is allocated in (and the
+			-- target-first re-pick above may have moved one): settle them for damage again,
+			-- or a refill of the very same nodes scores lower than the tree it came from
+			if okR and p.lns_repick ~= false then repickMasteries("value") end
 			local o = output()
 			local vR = okR and feasible(o) and value(o) or nil
+			if p.lns_debug then
+				local unmet = {}
+				for stat, t in pairs(targets) do
+					local x = readStat(o, stat) or 0
+					if x < t then unmet[#unmet + 1] = stat .. "=" .. math.floor(x / math.max(t, 1) * 1000) / 1000 end
+				end
+				debugLog[#debugLog + 1] = { round = round, refill = r, ok = okR, value = value(o), current = current,
+					freed = freed, feasible = feasible(o), unmet = unmet,
+					stopped = okR and type(resR) == "table" and resR.stoppedBecause or tostring(resR),
+					added = okR and type(resR) == "table" and resR.allocated and #resR.allocated or nil,
+					addedNames = (function() local t = {} if okR and type(resR) == "table" then for _, a in ipairs(resR.allocated or {}) do t[#t + 1] = a.name end end return t end)(),
+					removed = removed, droppedValue = droppedValue }
+			end
 			if vR and (not v or vR > v) then ok, v, bestFill = true, vR, spec:CreateUndoState() end
 			if not ok then ok = okR end
 		end
@@ -2271,7 +2290,7 @@ local function lnsImprove(p, res, protected)
 		spec:BuildAllDependsAndPaths()
 		rebuild()
 	end
-	return kept
+	return kept, debugLog
 end
 
 -- Remove the cheapest branches the optimiser added (lowest weighted loss per point) until
@@ -2415,7 +2434,7 @@ function API.auto_allocate(p)
 		ok, res = pcall(autoAllocate, p)
 	end
 	if ok and (p.lns_rounds or 0) > 0 then
-		local ok2, kept = pcall(lnsImprove, p, res, protected)
+		local ok2, kept, debugLog = pcall(lnsImprove, p, res, protected)
 		-- spend anything a round left over
 		local left = (p.points or 0) - (B().spec:CountAllocNodes() - countAtStart)
 		if ok2 and p.points and left > 0 then
@@ -2425,6 +2444,8 @@ function API.auto_allocate(p)
 			q.max_seconds = math.min(p.max_seconds or 40, 60)
 			pcall(autoAllocate, q)
 		end
+		if not ok2 then res.lnsError = tostring(kept) end
+		if p.lns_debug then res.lnsDebug = debugLog end
 		if ok2 then
 			res.lns = kept
 			local after = {}

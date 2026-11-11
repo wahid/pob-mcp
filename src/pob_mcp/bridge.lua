@@ -2199,8 +2199,40 @@ local function lnsImprove(p, res, protected)
 		local pool = math.min(#branches, k + 4)
 		local state = spec:CreateUndoState()
 		local countBefore = spec:CountAllocNodes()
+		local beforeSet = {}
+		if p.lns_debug then for id in pairs(spec.allocNodes) do beforeSet[id] = true end end
 		local freed, removed = 0, {}
-		for i = 1, pool do
+		-- region move (every second round): remove a node with everything that only connects
+		-- to the tree through it, 6 to lns_region_max points at once. Leaf drops only reach a
+		-- few points, and a tree whose targets and damage compete for the same points can
+		-- only get better by moving a whole region elsewhere
+		local regionNotables
+		if p.lns_region ~= false and round % 2 == 0 then
+			local cands = {}
+			for id, node in pairs(spec.allocNodes) do
+				if not protected[id] and not node.ascendancyName and id < 65536
+					and node.type ~= "ClassStart" and node.type ~= "Keystone" and node.type ~= "Socket" then
+					local size, okRoot = #node.depends, true
+					if size >= 6 and size <= (p.lns_region_max or 24) then
+						for _, d in ipairs(node.depends) do
+							if protected[d.id] or d.ascendancyName or d.type == "Socket" or d.type == "Keystone"
+								or d.type == "ClassStart" or d.id >= 65536 then okRoot = false break end
+						end
+						if okRoot then cands[#cands + 1] = node end
+					end
+				end
+			end
+			if #cands > 0 then
+				local root = cands[math.random(#cands)]
+				regionNotables = {}
+				for _, d in ipairs(root.depends) do
+					if d.type == "Notable" then regionNotables[#regionNotables + 1] = d.dn end
+					removed[#removed + 1] = d.dn
+				end
+				spec:DeallocNode(root)
+			end
+		end
+		for i = 1, (regionNotables and 0 or pool) do
 			if #removed >= k then break end
 			if ((i + seed) % 3 ~= 0) or (pool - i < k - #removed) then
 				local b = branches[i]
@@ -2233,7 +2265,17 @@ local function lnsImprove(p, res, protected)
 				spec:RestoreUndoState(dropped)
 				spec:BuildAllDependsAndPaths()
 				rebuild()
-				q.pick_noise = p.lns_noise or 0.3
+				-- after a region drop, the second refill on bans the region's notables, so
+				-- the points have to grow somewhere else; the third on also adds noise
+				if regionNotables and #regionNotables > 0 then
+					local av = {}
+					for _, n in ipairs(p.avoid or {}) do av[#av + 1] = n end
+					for _, n in ipairs(regionNotables) do av[#av + 1] = n end
+					q.avoid = av
+					q.pick_noise = r > 2 and (p.lns_noise or 0.3) or nil
+				else
+					q.pick_noise = p.lns_noise or 0.3
+				end
 			end
 			local okR, resR = pcall(autoAllocate, q)
 			-- the greedy picks a mastery's effect for the step it is allocated in (and the
@@ -2249,16 +2291,20 @@ local function lnsImprove(p, res, protected)
 					if x < t then unmet[#unmet + 1] = stat .. "=" .. math.floor(x / math.max(t, 1) * 1000) / 1000 end
 				end
 				debugLog[#debugLog + 1] = { round = round, refill = r, ok = okR, value = value(o), current = current,
-					freed = freed, feasible = feasible(o), unmet = unmet,
+					freed = freed, feasible = feasible(o), unmet = unmet, region = regionNotables ~= nil,
+					avoidList = q.avoid, regionNotables = regionNotables,
+					stages = okR and type(resR) == "table" and resR.stages or nil,
 					stopped = okR and type(resR) == "table" and resR.stoppedBecause or tostring(resR),
 					added = okR and type(resR) == "table" and resR.allocated and #resR.allocated or nil,
 					addedNames = (function() local t = {} if okR and type(resR) == "table" then for _, a in ipairs(resR.allocated or {}) do t[#t + 1] = a.name end end return t end)(),
-					removed = removed, droppedValue = droppedValue }
+					removed = removed, droppedValue = droppedValue,
+					gone = (function() local t = {} for id in pairs(beforeSet) do local n = spec.nodes[id] if not spec.allocNodes[id] and n and n.type ~= "Normal" then t[#t + 1] = n.dn end end return t end)(),
+					new = (function() local t = {} for id, n in pairs(spec.allocNodes) do if not beforeSet[id] and n.type ~= "Normal" then t[#t + 1] = n.dn end end return t end)() }
 			end
 			if vR and (not v or vR > v) then ok, v, bestFill = true, vR, spec:CreateUndoState() end
 			if not ok then ok = okR end
 		end
-		q.pick_noise = nil
+		q.pick_noise, q.avoid = nil, p.avoid
 		if refills > 1 and bestFill then
 			spec:RestoreUndoState(bestFill)
 			spec:BuildAllDependsAndPaths()
@@ -2559,6 +2605,14 @@ function autoAllocate(p)
 	local granted = {}
 	local avoid = {}
 	for _, n in ipairs(p.avoid or {}) do avoid[tostring(n):lower()] = true end
+	-- a candidate's path may cross an avoided notable, which would allocate it anyway
+	local function pathAvoided(path)
+		if not p.avoid then return false end
+		for _, n in ipairs(path) do
+			if n.type == "Notable" and not n.alloc and avoid[(n.dn or ""):lower()] then return true end
+		end
+		return false
+	end
 	-- Minimum targets, e.g. { PhysicalMaximumHitTaken = 10000 }: met first, then kept
 	local targets = {}
 	for stat, v in pairs(p.targets or {}) do targets[stat] = tonumber(v) end
@@ -2705,7 +2759,7 @@ function autoAllocate(p)
 					-- a runegraft sits on a mastery node but is one fixed modifier
 					or (node.type == "Mastery" and node.overrideType == "AlternateMastery")
 					or (includeSmall and node.type == "Normal"))
-				and not avoid[node.dn:lower()] then
+				and not avoid[node.dn:lower()] and not pathAvoided(P(node)) then
 				local key = node.modKey
 				if cache[key] == nil then
 					if stale[key] ~= nil then
@@ -2726,7 +2780,8 @@ function autoAllocate(p)
 			for _, node in pairs(spec.nodes) do
 				if node.type == "Mastery" and node.overrideType ~= "AlternateMastery" and not node.alloc and P(node) and #P(node) >= 1
 					and #P(node) <= math.min(p.mastery_reach or 6, maxCost, remaining)
-					and node.masteryEffects and #node.masteryEffects > 0 and not avoid[(node.dn or ""):lower()] then
+					and node.masteryEffects and #node.masteryEffects > 0 and not avoid[(node.dn or ""):lower()]
+					and not pathAvoided(P(node)) then
 					-- a mastery further away is scored with the path that reaches it
 					local set = {}
 					for _, pn in ipairs(P(node)) do set[pn] = true end
@@ -2753,7 +2808,8 @@ function autoAllocate(p)
 			local groups = {}
 			for _, node in pairs(spec.nodes) do
 				if node.type == "Notable" and not node.alloc and node.group and P(node) and #P(node) > 0
-					and not node.ascendancyName and not node.isProxy and not avoid[(node.dn or ""):lower()] then
+					and not node.ascendancyName and not node.isProxy and not avoid[(node.dn or ""):lower()]
+					and not pathAvoided(P(node)) then
 					groups[node.group] = groups[node.group] or {}
 					table.insert(groups[node.group], node)
 				end
@@ -2963,7 +3019,8 @@ function autoAllocate(p)
 			for _, node in pairs(spec.nodes) do
 				if not node.alloc and node.path and #node.path > 0 and #node.path <= maxCost and not tabu[node.id]
 					and (node.type == "Notable" or (includeKeystones and node.type == "Keystone"))
-					and not node.ascendancyName and not node.isProxy and not avoid[(node.dn or ""):lower()] then
+					and not node.ascendancyName and not node.isProxy and not avoid[(node.dn or ""):lower()]
+					and not pathAvoided(P(node)) then
 					adds[#adds + 1] = node
 				end
 			end

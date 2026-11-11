@@ -2220,9 +2220,31 @@ local function lnsImprove(p, res, protected)
 		for kk, v in pairs(p) do q[kk] = v end
 		q.points, q.lns_rounds, q.refine, q.anoint = freed, 0, true, false
 		q.max_seconds = math.min(p.max_seconds or 40, 30)
-		local ok = pcall(autoAllocate, q)
-		local out = output()
-		local v = feasible(out) and value(out) or nil
+		-- lns_refills > 1: refill the same gap several times, the first greedily and the rest
+		-- with pick_noise, and keep the best feasible result. A plain greedy refill rebuilds
+		-- the tree that was just dropped; randomised ones can swap a group of notables at once
+		local refills = p.lns_refills or 1
+		local dropped = spec:CreateUndoState()
+		local ok, v, bestFill
+		for r = 1, refills do
+			if r > 1 then
+				spec:RestoreUndoState(dropped)
+				spec:BuildAllDependsAndPaths()
+				rebuild()
+				q.pick_noise = p.lns_noise or 0.3
+			end
+			local okR = pcall(autoAllocate, q)
+			local o = output()
+			local vR = okR and feasible(o) and value(o) or nil
+			if vR and (not v or vR > v) then ok, v, bestFill = true, vR, spec:CreateUndoState() end
+			if not ok then ok = okR end
+		end
+		q.pick_noise = nil
+		if refills > 1 and bestFill then
+			spec:RestoreUndoState(bestFill)
+			spec:BuildAllDependsAndPaths()
+			rebuild()
+		end
 		-- lns_temperature > 0 (in % of the weighted score) also accepts some worse feasible
 		-- trees early on, to leave a plateau; the best tree seen is restored at the end
 		local temp = (p.lns_temperature or 0) * (1 - round / rounds)
@@ -2750,6 +2772,7 @@ function autoAllocate(p)
 
 		-- Pass 2: exact value of the whole path for the shortlist
 		local best, bestScore, bestTarget, bestCand
+		local scored = {}
 		local avoidSet = p.reroute ~= false and radiusAvoidSet() or nil
 		local altOf = avoidSet and altPaths(avoidSet) or nil
 		for i = 1, math.min(shortlist, #cands) do
@@ -2789,6 +2812,17 @@ function autoAllocate(p)
 				end
 			end
 			if not bestScore or sc > bestScore then best, bestScore, bestTarget, bestCand = node, sc, ts, c end
+			if p.pick_noise then scored[#scored + 1] = { node, sc, ts, c } end
+		end
+		-- pick_noise (0-1): choose at random among the candidates scoring within that share
+		-- of the best, so LNS refills explore other near-best trees instead of the same one
+		if p.pick_noise and bestScore and bestScore > 0 and #scored > 1 then
+			local rcl = {}
+			for _, e in ipairs(scored) do
+				if e[2] > 0 and e[2] >= bestScore * (1 - p.pick_noise) then rcl[#rcl + 1] = e end
+			end
+			local e = rcl[math.random(#rcl)]
+			best, bestScore, bestTarget, bestCand = e[1], e[2], e[3], e[4]
 		end
 		if not targetsGivenUp and not slackMode and next(baseUnmet) and (not best or (bestTarget or 0) <= 0) then
 			-- Nothing on the tree moves the unmet targets: carry on with the weights only

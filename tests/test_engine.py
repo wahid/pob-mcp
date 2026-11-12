@@ -426,3 +426,37 @@ def test_auto_allocate_slack_mode(deadeye):
 def test_auto_allocate_keeps_build_valid(deadeye):
     res = deadeye.call("auto_allocate", {"points": 30, "weights": {"CombinedDPS": 1}, "max_seconds": 60})
     assert all(v["met"] for v in (res.get("validity") or {}).values())
+
+
+def test_auto_allocate_require(deadeye):
+    before = deadeye.call("tree")["notables"]
+    assert "Heartseeker" not in before
+    res = deadeye.call("auto_allocate", {"points": 15, "weights": {"CombinedDPS": 1},
+                                         "require": ["Heartseeker"], "max_seconds": 30})
+    assert "Heartseeker" in deadeye.call("tree")["notables"]
+    assert res["required"]["points"] >= 1
+    assert res["required"]["points"] + res["pointsSpent"] <= 15
+
+
+def test_auto_allocate_require_over_budget(deadeye):
+    with pytest.raises(PobError, match="require"):
+        deadeye.call("auto_allocate", {"points": 1, "weights": {"CombinedDPS": 1},
+                                       "require": ["Heartseeker", "Ambush"]})
+
+
+def test_target_report(deadeye):
+    life = deadeye.call("stats", {"keys": ["Life"]})["Life"]
+    res = deadeye.call("target_report", {"targets": {"Life": life + 500, "BlockChance": 0}})
+    rows = {r["stat"]: r for r in res["targets"]}
+    assert rows["Life"]["met"] is False and rows["Life"]["slackPct"] < 0
+    assert res["tightest"] == "Life"
+    assert res["metric"]["value"] > 0
+
+
+def test_compare_trees(deadeye):
+    xml = deadeye.call("export_xml")["xml"]
+    edit(deadeye, {"op": "allocate_node", "node": "Heartseeker"})
+    res = deadeye.call("compare_trees", {"xml": xml})
+    assert "Heartseeker" in res["current"]["notables"]
+    assert res["points"]["current"] > res["points"]["other"]
+    assert "Heartseeker" in deadeye.call("tree")["notables"]  # current build kept

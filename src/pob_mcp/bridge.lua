@@ -2403,7 +2403,59 @@ local function dropCheapBranches(points, protected, weights)
 	return before - spec:CountAllocNodes()
 end
 
+-- require: picks the caller wants in the tree whatever the optimiser thinks of them, as node
+-- names/ids or {node=..., effect=...} for a mastery. They are allocated before the search,
+-- nearest first (so their paths share nodes instead of each taking its own shortest path from
+-- the start), paid for out of `points`, and never dropped by the LNS.
+local function allocateRequired(p)
+	local spec = B().spec
+	local pending, ids, notes = {}, {}, {}
+	for _, ref in ipairs(p.require or {}) do
+		local want = type(ref) == "table" and ref.node or ref
+		local node = resolveNode(want)
+		if not node then error("require: passive node not found: " .. tostring(want), 0) end
+		pending[#pending + 1] = { node = node, effect = type(ref) == "table" and ref.effect or nil }
+		ids[#ids + 1] = node.id
+	end
+	local before = spec:CountAllocNodes()
+	-- notables and keystones first, masteries once a notable next to them is in
+	table.sort(pending, function(a, b) return (a.node.type == "Mastery" and 1 or 0) < (b.node.type == "Mastery" and 1 or 0) end)
+	while #pending > 0 do
+		local bi, bc
+		for i, r in ipairs(pending) do
+			local c = r.node.alloc and 0 or (r.node.path and #r.node.path or math.huge)
+			if r.node.type == "Mastery" and c > 0 then c = c + 1000 end
+			if not bc or c < bc then bi, bc = i, c end
+		end
+		local r = table.remove(pending, bi)
+		if r.node.type == "Mastery" then
+			if r.effect then
+				for _, n in ipairs(applyEdits({ { op = "set_mastery", node = r.node.id, effect = r.effect } })) do notes[#notes + 1] = n end
+			elseif not r.node.alloc then
+				for _, n in ipairs(applyEdits({ { op = "allocate_node", node = r.node.id } })) do notes[#notes + 1] = n end
+			end
+		elseif not r.node.alloc then
+			if not r.node.path then error("require: " .. r.node.dn .. " is not reachable", 0) end
+			for _, n in ipairs(applyEdits({ { op = "allocate_node", node = r.node.id } })) do notes[#notes + 1] = n end
+		end
+	end
+	local spent = spec:CountAllocNodes() - before
+	if p.points then
+		if spent > p.points then
+			error(("require: the required picks cost %d points, more than the %d given"):format(spent, p.points), 0)
+		end
+		p.points = p.points - spent
+	end
+	return ids, spent, notes
+end
+
 function API.auto_allocate(p)
+	local requiredIds, requiredSpent, requiredNotes
+	if p.require and #p.require > 0 then
+		requiredIds, requiredSpent, requiredNotes = allocateRequired(p)
+		p.lns_keep = p.lns_keep or {}
+		for _, id in ipairs(requiredIds) do p.lns_keep[#p.lns_keep + 1] = id end
+	end
 	local mainAtStart = B().skillsTab.socketGroupList[B().mainSocketGroup]
 	local countAtStart = B().spec:CountAllocNodes()
 	local protected = {}
@@ -2536,6 +2588,9 @@ function API.auto_allocate(p)
 	for _, node in pairs(B().spec.allocNodes) do keepRunegraft(node) end
 	keepMainGroup(mainAtStart)
 	if not ok then error(res, 0) end
+	if requiredIds then
+		res.required = { points = requiredSpent, notes = requiredNotes }
+	end
 	return res
 end
 
@@ -5007,6 +5062,114 @@ function API.ascendancy_notables(p)
 	end)
 	if want and #res == 0 then error("No ascendancy named " .. tostring(p.ascendancy) .. " (see list_classes)", 0) end
 	return { treeVersion = spec.treeVersion, ascendancies = res }
+end
+
+-- Where each target stands and what holds it up. For every target: its value, how far above
+-- (or below) the minimum it is, the value over the cap where PoB tracks one (block,
+-- suppression, resists), its largest sources, and the allocated tree picks that hold it up
+-- most (what the stat would drop to without each one). Targets are listed tightest first,
+-- so the first rows are the ones a tree change is most likely to break.
+function API.target_report(p)
+	local build = B()
+	local spec = build.spec
+	local out = output()
+	local targets = p.targets or {}
+	local metric = p.metric or defaultMetric()
+	local picks = {}
+	for id, node in pairs(spec.allocNodes) do
+		if (node.type == "Notable" or node.type == "Keystone" or node.type == "Mastery")
+			and not node.ascendancyName then
+			picks[#picks + 1] = node
+		end
+	end
+	local calcFunc = build.calcsTab:GetMiscCalculator()
+	local without = {}
+	for _, node in ipairs(picks) do
+		local ok, o = pcall(calcWithRemoval, calcFunc, { removeNodes = { [node] = true } }, false)
+		if ok then without[node] = o end
+	end
+	local function holders(stat, value)
+		local rows = {}
+		for node, o in pairs(without) do
+			local v = readStat(o, stat) or 0
+			if value - v > 1e-6 then
+				rows[#rows + 1] = { node = node.dn, id = node.id, type = node.type, without = num(v),
+					dropPct = value ~= 0 and math.floor((value - v) / math.abs(value) * 1000 + 0.5) / 10 or nil }
+			end
+		end
+		table.sort(rows, function(a, b) return (a.without or 0) < (b.without or 0) end)
+		while #rows > (p.top or 5) do table.remove(rows) end
+		return rows
+	end
+	local rows = {}
+	for stat, t in pairs(targets) do
+		t = tonumber(t) or 0
+		local v = readStat(out, stat) or 0
+		local row = { stat = stat, target = num(t), value = num(v), met = v >= t,
+			slackPct = t ~= 0 and math.floor((v - t) / math.abs(t) * 1000 + 0.5) / 10 or nil }
+		local over = readStat(out, stat .. "OverCap")
+		local max = readStat(out, stat .. "Max")
+		if over or max then row.cap = max and num(max) or nil; row.overCap = over and num(over) or nil end
+		row.heldUpBy = holders(stat, v)
+		local okE, ex = pcall(API.explain_stat, { stat = stat, limit = p.sources or 5 })
+		if okE and ex then row.sources = ex.sources end
+		rows[#rows + 1] = row
+	end
+	table.sort(rows, function(a, b) return (a.slackPct or 0) < (b.slackPct or 0) end)
+	local mv = readStat(out, metric) or 0
+	return {
+		metric = { stat = metric, value = num(mv), heldUpBy = holders(metric, mv) },
+		targets = rows,
+		tightest = rows[1] and rows[1].stat or nil,
+		note = "heldUpBy: the allocated notables, keystones and masteries the stat depends on most, with its value without each one",
+	}
+end
+
+-- Compare the current tree with another build's (p.xml): picks only one of them has, and the
+-- headline stats of both. The current build is left as it was.
+function API.compare_trees(p)
+	if not p.xml then error("compare_trees needs `xml` (the other build)", 0) end
+	local keys = { "FullDPS", "CombinedDPS", "Life", "LifeUnreserved", "EnergyShield", "Mana", "ManaUnreserved",
+		"TotalEHP", "PhysicalMaximumHitTaken", "FireMaximumHitTaken", "ColdMaximumHitTaken",
+		"LightningMaximumHitTaken", "ChaosMaximumHitTaken", "BlockChance", "SpellBlockChance",
+		"SpellSuppressionChance", "Armour", "Evasion" }
+	for _, k in ipairs(p.stats or {}) do keys[#keys + 1] = k end
+	local function snap()
+		local t = API.tree({})
+		return { tree = t, stats = pickStats(keys), points = B().spec:CountAllocNodes() }
+	end
+	local build = B()
+	local name = build.buildName
+	local mine = build:SaveDB("code")
+	local a = snap()
+	main:SetMode("BUILD", false, "compare", p.xml)
+	frame()
+	local okB, b = pcall(snap)
+	main:SetMode("BUILD", false, name, mine)
+	frame()
+	if not okB then error("could not read the other build: " .. tostring(b), 0) end
+	local function diffList(x, y)
+		local inY, res = {}, {}
+		for _, v in ipairs(y or {}) do inY[v] = true end
+		for _, v in ipairs(x or {}) do if not inY[v] then res[#res + 1] = v end end
+		return res
+	end
+	local res = { current = {}, other = {}, points = { current = a.points, other = b.points }, stats = {} }
+	for _, k in ipairs({ "keystones", "notables", "masteries", "ascendancyNodes" }) do
+		res.current[k] = diffList(a.tree[k], b.tree[k])
+		res.other[k] = diffList(b.tree[k], a.tree[k])
+	end
+	for _, k in ipairs(keys) do
+		local x, y = a.stats[k], b.stats[k]
+		if x or y then
+			res.stats[k] = { current = x, other = y,
+				ratio = (type(x) == "number" and type(y) == "number" and y ~= 0) and math.floor(x / y * 1000 + 0.5) / 1000 or nil }
+		end
+	end
+	res.ascendancy = { current = a.tree.ascendancy, other = b.tree.ascendancy }
+	res.smallPassives = { current = a.tree.smallPassives, other = b.tree.smallPassives }
+	res.note = "current/other list the picks only that build has; stats.ratio = current / other"
+	return res
 end
 
 function API.keystones()

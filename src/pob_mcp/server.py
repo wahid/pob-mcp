@@ -22,7 +22,7 @@ except ImportError:  # MCP Python SDK 1.x
 from pydantic import BaseModel, Field
 
 from . import library, online
-from .engine import PobEngine, PobError, encode_build_code
+from .engine import PobEngine, PobError, encode_build_code, resolve_build_input
 
 log = logging.getLogger("pob_mcp")
 ORIG_CWD = Path.cwd()  # the engine chdirs into PoB's src folder
@@ -590,6 +590,7 @@ def auto_allocate_passives(
     refine: bool = True,
     lns_rounds: int = 0,
     lns_seconds: int = 120,
+    require: list[str | int | dict[str, Any]] | None = None,
 ) -> dict:
     """Spend passive points automatically with a greedy optimiser that uses PoB's calculator.
 
@@ -642,6 +643,12 @@ def auto_allocate_passives(
 
     fast=true (default) reuses earlier per-node estimates between full refreshes every few
     steps and scores the shortlist exactly; fast=false re-scores everything every step.
+
+    `require` forces picks in before the search, e.g. ["Lightning Walker", "Heart and Soul",
+    {"node": 30393, "effect": "from Equipped Body Armour"}] (a mastery takes its effect as
+    text or id). They are allocated nearest first so their paths share nodes, paid for out of
+    `points`, and the LNS never drops them; `required` in the result shows their cost. Use it
+    for the picks a build is built around: the optimiser fills the rest under the targets.
     """
     snapshot = _call("export_xml")["xml"]
     res = _call("auto_allocate", {
@@ -650,7 +657,7 @@ def auto_allocate_passives(
         "avoid": avoid or [], "max_seconds": max_seconds, "targets": targets or {},
         "masteries": masteries, "jewels": jewels or [], "anoint": anoint, "fast": fast,
         "target_weight": target_weight, "target_mode": target_mode, "refine": refine,
-        "lns_rounds": lns_rounds, "lns_seconds": lns_seconds,
+        "lns_rounds": lns_rounds, "lns_seconds": lns_seconds, "require": require or [],
     })
     _history.append(snapshot)
     del _history[:-_MAX_HISTORY]
@@ -806,6 +813,37 @@ def price_check(names: list[str] | None = None, league: str | None = None) -> di
 # ---------------------------------------------------------------------------
 # Tools: understanding a build
 # ---------------------------------------------------------------------------
+
+@mcp.tool()
+def target_report(targets: dict[str, float], metric: str | None = None, top: int = 5,
+                  sources: int = 5) -> dict:
+    """Where each defensive target stands and what holds it up, tightest first.
+
+    `targets` are minimums as for auto_allocate_passives, e.g. {"LifeUnreserved": 3000,
+    "SpellBlockChance": 65}. Per target: value, slackPct (how far above the minimum, negative
+    = unmet), cap and overCap where PoB tracks them (block, suppression, resists: block above
+    the cap still matters for Versatile Combatant), its largest modifier sources, and
+    heldUpBy: the allocated notables, keystones and masteries it depends on most, with the
+    value it would drop to without each. The same list is given for `metric` (default: main
+    DPS). Use it before a tree change to see which picks are load-bearing, and after a failed
+    auto_allocate to see what blocks a target."""
+    return _call("target_report", {"targets": targets, "metric": metric, "top": top, "sources": sources})
+
+
+@mcp.tool()
+def compare_trees(other: str, stats: list[str] | None = None) -> dict:
+    """Compare the current build's passive tree with another build's (`other`: share code,
+    build link, XML or .xml path, as for load_build). Lists the keystones, notables, masteries
+    and ascendancy notables only one of them has, points and small-passive counts, and the
+    headline stats of both with current/other ratios (add more with `stats`). The current
+    build stays loaded and unchanged."""
+    src = other.strip()
+    if len(src) < 1024 and not src.startswith("<") and src.lower().endswith(".xml"):
+        path = Path(os.path.expanduser(src))
+        src = str(path if path.is_absolute() else ORIG_CWD / path)
+    xml = resolve_build_input(src)
+    return _call("compare_trees", {"xml": xml, "stats": stats or []})
+
 
 @mcp.tool()
 def explain_stat(stat: str, mod_name: str | None = None, skill: bool = True, limit: int = 40) -> dict:

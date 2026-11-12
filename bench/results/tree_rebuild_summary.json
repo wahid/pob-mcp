@@ -8,12 +8,12 @@
   "run": "run7"
  },
  "berserker": {
-  "dps": 0.967,
-  "worstHit": 1.005,
+  "dps": 2.012,
+  "worstHit": 0.986,
   "valid": true,
   "match": true,
-  "strategy": "blend",
-  "run": "run4"
+  "strategy": "slack",
+  "run": "regression-2026-11"
  },
  "chieftain": {
   "dps": 1.085,
@@ -24,28 +24,28 @@
   "run": "run4"
  },
  "elementalist": {
-  "dps": 0.911,
-  "worstHit": 0.992,
+  "dps": 1.021,
+  "worstHit": 0.984,
   "valid": true,
   "match": true,
   "strategy": "slack",
-  "run": "run8"
+  "run": "regression-2026-11"
  },
  "guardian": {
-  "dps": 1.165,
-  "worstHit": 1.039,
+  "dps": 1.314,
+  "worstHit": 0.993,
   "valid": true,
   "match": true,
-  "strategy": "targets-first+small",
-  "run": "run4"
+  "strategy": "repair",
+  "run": "regression-2026-11"
  },
  "inquisitor": {
-  "dps": 1.026,
-  "worstHit": 1.001,
+  "dps": 1.245,
+  "worstHit": 0.992,
   "valid": true,
   "match": true,
-  "strategy": "targets-first+small",
-  "run": "run4"
+  "strategy": "targets-first",
+  "run": "regression-2026-11"
  },
  "necromancer": {
   "dps": 1.005,
@@ -56,12 +56,12 @@
   "run": "run4"
  },
  "pathfinder": {
-  "dps": 1.926,
-  "worstHit": 1.028,
+  "dps": 2.423,
+  "worstHit": 0.991,
   "valid": true,
   "match": true,
-  "strategy": "targets-first",
-  "run": "run4"
+  "strategy": "repair",
+  "run": "regression-2026-11"
  },
  "slayer": {
   "dps": 1.552,
@@ -72,12 +72,12 @@
   "run": "run4"
  },
  "warden": {
-  "dps": 0.964,
-  "worstHit": 0.994,
+  "dps": 1.396,
+  "worstHit": 0.984,
   "valid": true,
   "match": true,
-  "strategy": "targets-first+small",
-  "run": "run4"
+  "strategy": "repair",
+  "run": "regression-2026-11"
  },
  "assassin": {
   "dps": 1.137,
@@ -96,12 +96,12 @@
   "run": "run1"
  },
  "deadeye": {
-  "dps": 0.91,
-  "worstHit": 1.044,
+  "dps": 1.226,
+  "worstHit": 1.0,
   "valid": true,
   "match": true,
-  "strategy": "targets-first",
-  "run": "run7"
+  "strategy": "slack",
+  "run": "regression-2026-11"
  },
  "gladiator": {
   "dps": 0.816,
@@ -112,43 +112,43 @@
   "run": "run17"
  },
  "hierophant": {
-  "dps": 0.852,
-  "worstHit": 0.988,
+  "dps": 0.927,
+  "worstHit": 0.993,
   "valid": true,
-  "match": false,
-  "strategy": "slack",
-  "run": "run17"
+  "match": true,
+  "strategy": "targets-first",
+  "run": "regression-2026-11"
  },
  "juggernaut": {
-  "dps": 0.933,
-  "worstHit": 0.981,
+  "dps": 0.967,
+  "worstHit": 0.983,
   "valid": true,
   "match": true,
   "strategy": "slack",
-  "run": "run10"
+  "run": "regression-2026-11"
  },
  "occultist": {
-  "dps": 0.932,
-  "worstHit": 1.013,
+  "dps": 1.256,
+  "worstHit": 0.986,
   "valid": true,
   "match": true,
-  "strategy": "targets-first+small",
-  "run": "run4"
+  "strategy": "slack",
+  "run": "regression-2026-11"
  },
  "saboteur": {
-  "dps": 0.935,
-  "worstHit": 0.981,
+  "dps": 1.113,
+  "worstHit": 0.982,
   "valid": true,
   "match": true,
-  "strategy": "slack",
-  "run": "run8"
+  "strategy": "repair",
+  "run": "regression-2026-11"
  },
  "trickster": {
-  "dps": 0.965,
-  "worstHit": 1.003,
+  "dps": 1.067,
+  "worstHit": 0.985,
   "valid": true,
   "match": true,
-  "strategy": "slack",
-  "run": "run14"
+  "strategy": "targets-first",
+  "run": "regression-2026-11"
  }
 }

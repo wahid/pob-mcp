@@ -7,26 +7,28 @@ after a save and reload. Match = valid, DPS >= 0.90 and every max hit >= 0.95.
 |---|---|---|---|---|---|
 | ascendant | 0.95 | 1.07 | yes | yes | slack |
 | assassin | 1.14 | 1.00 | yes | yes | targets-first+small |
-| berserker | 0.97 | 1.00 | yes | yes | blend |
+| berserker | 2.01 | 0.99 | yes | yes | slack |
 | champion | 1.22 | 1.00 | yes | yes | targets-first |
 | chieftain | 1.08 | 0.99 | yes | yes | targets-first+small |
-| deadeye | 0.91 | 1.04 | yes | yes | targets-first |
-| elementalist | 0.91 | 0.99 | yes | yes | slack |
+| deadeye | 1.23 | 1.00 | yes | yes | slack |
+| elementalist | 1.02 | 0.98 | yes | yes | slack |
 | gladiator | 0.82 | 0.98 | yes |  | slack |
-| guardian | 1.17 | 1.04 | yes | yes | targets-first+small |
-| hierophant | 0.85 | 0.99 | yes |  | slack |
-| inquisitor | 1.03 | 1.00 | yes | yes | targets-first+small |
-| juggernaut | 0.93 | 0.98 | yes | yes | slack |
+| guardian | 1.31 | 0.99 | yes | yes | repair |
+| hierophant | 0.93 | 0.99 | yes | yes | targets-first |
+| inquisitor | 1.25 | 0.99 | yes | yes | targets-first |
+| juggernaut | 0.97 | 0.98 | yes | yes | slack |
 | necromancer | 1.00 | 0.98 | yes | yes | targets-first+small |
-| occultist | 0.93 | 1.01 | yes | yes | targets-first+small |
-| pathfinder | 1.93 | 1.03 | yes | yes | targets-first |
-| saboteur | 0.94 | 0.98 | yes | yes | slack |
+| occultist | 1.26 | 0.99 | yes | yes | slack |
+| pathfinder | 2.42 | 0.99 | yes | yes | repair |
+| saboteur | 1.11 | 0.98 | yes | yes | repair |
 | slayer | 1.55 | 0.99 | yes | yes | targets-first |
-| trickster | 0.96 | 1.00 | yes | yes | slack |
-| warden | 0.96 | 0.99 | yes | yes | targets-first+small |
+| trickster | 1.07 | 0.98 | yes | yes | targets-first |
+| warden | 1.40 | 0.98 | yes | yes | repair |
 
-17/19 match. The builds that matched in the earlier runs (three strategies, no LNS) were not
-rerun with the final optimiser: a full 19-build run takes several hours.
+18/19 match. A full rerun of all 19 builds with the final optimiser (slack, repair and
+targets-first, 20 LNS rounds) matched 16 in one pass; the table keeps the best run per build.
+Single runs vary: Ascendant and Necromancer reached 0.83 and 0.89 in that rerun, and `main`
+before the LNS fixes gave the same numbers with the same settings.
 
 ## What moved the eight misses (11/19 to 17/19)
 
@@ -48,11 +50,15 @@ rerun with the final optimiser: a full 19-build run takes several hours.
   pass when the time limit hits, so points are not left unspent. Correct freed-point counting
   in LNS. Optional annealing in LNS. Routes that avoid Unnatural Instinct radii.
 
-## Remaining misses
+## Hierophant and Gladiator
 
-- **Gladiator** (32 free points): every max-hit and block target is met within 1-2%. Adding
-  Ambidexterity (+15% DPS) or Assured Strike (+7%) needs 2-3 points that are all holding a target.
-- **Hierophant** (70 free points): same picture. Life, mana and physical max hit are each
-  within 1-2% of the target, and the damage notables the original has (Crackling Speed,
-  Disciple of the Forbidden, Primal Manifestation) cost points the targets use.
-  An earlier hand rebuild by Claude with the skill reached 0.94.
+- **Hierophant** now matches without help (0.93) after the LNS fixes: LNS ends on the best tree
+  it has seen, and refills are scored against the tree they came from. Forcing the original's
+  four damage picks with `auto_allocate_passives(require=[...])` reaches 0.995 with every
+  target met (`agent_hierophant_require.xml`).
+- **Gladiator** is still at 0.82 (32 free points; Ambidexterity and Assured Strike need points that
+  are all holding a target). `target_report` shows why: spell block (Versatile Combatant
+  turns attack block above the cap into spell block) sits at 24, far below its target, because
+  the optimiser never takes the block mastery and only has 8 points of attack block over the cap
+  (the original has 22). Forcing the original's damage notables keeps the DPS but leaves the
+  block targets far off.

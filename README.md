@@ -30,6 +30,7 @@ for the same build and config.
 | `explain_stat` | Where a stat comes from: PoB's breakdown plus every modifier source (tree node, item, gem) with its value. Pass a damage type ("Lightning") for base, added, increased and more per source type, conversion and enemy resistance |
 | `evaluate_scenarios` | The build against mapping, pinnacle-boss and uber-boss setups (or your own config sets) in one call |
 | `compare_builds` | Diff the loaded build against another (stats, keystones, notables, gems, gear) |
+| `compare_trees` | Diff only the passive trees of the loaded build and another (keystones, notables, masteries, ascendancy, small-passive count) with stat ratios |
 | `render_tree` | A picture of the passive tree with allocated nodes and an optional route highlighted |
 | `list_item_sets` / `list_config_sets` | The build's gear sets (e.g. budget vs endgame) and config sets (e.g. mapping vs bossing) |
 
@@ -71,7 +72,8 @@ for the same build and config.
 | `find_routes` | 2–3 distinct cheapest routes to a node, with `via` / `avoid`, what each route picks up, and PoB-calculated stat changes |
 | `list_mastery_effects` | Mastery options, for one mastery or every one you can allocate now |
 | `list_item_slots` | Gear slots plus allocated tree jewel sockets |
-| `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards; also picks mastery effects, sockets planned `jewels`, and can `anoint` |
+| `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards; also picks mastery effects, sockets planned `jewels`, and can `anoint`. `require` forces nodes (or `{node, effect}` masteries) in first, and they stay through LNS |
+| `target_report` | For each target stat: value, slack, cap and over-cap, which allocated picks hold it up, and its modifier sources; tightest first |
 | `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree, most valuable nodes first |
 | `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
 | `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |
@@ -287,9 +289,10 @@ python bench/tree_rebuild.py --pob-path ~/PathOfBuilding builds/*.xml --out resu
 ```
 
 Use `load_ladder_build` (or poe.ninja directly) to collect builds. On 19 random geared
-ladder characters (one per ascendancy, November 2026) the optimiser matches 17 and beats the
-original on 9. The two left (Gladiator 82%, Hierophant 85% of the DPS, both at every max-hit
-target) are trees where the defense targets compete with damage for the same few points.
+ladder characters (one per ascendancy, November 2026) the optimiser matches 18 and beats the
+original on 15. The one left, Gladiator (82% of the DPS at every max-hit target), is a tree
+where spell block from Versatile Combatant competes with damage for the same few points.
+`--jobs N` runs builds in parallel, one PoB per process.
 `bench/results/README.md` has the per-build numbers.
 
 ## Testing

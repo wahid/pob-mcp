@@ -73,8 +73,8 @@ class TreeOptimizer:
     include_keystones: bool = False
     max_seconds: float = 900
     max_iters: int = 40
-    swap_radius: int = 16
-    fill_step: int = 20
+    swap_radius: int = 8
+    fill_step: int = 10
     reach: int | None = None
     mip_seconds: float = 30
     weights: dict[str, float] | None = None

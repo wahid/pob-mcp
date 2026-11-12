@@ -683,7 +683,8 @@ def optimize_tree(
     weights: dict[str, float] | None = None,
     max_seconds: int = 900,
     mip_seconds: int = 30,
-    swap_radius: int = 16,
+    swap_radius: int = 8,
+    fill_step: int = 10,
 ) -> dict:
     """Re-optimise the whole passive tree with an exact solver (integer programming) instead of
     the greedy one. Unlike auto_allocate_passives it sees long paths, swaps whole regions, and
@@ -708,6 +709,9 @@ def optimize_tree(
     {"node", "effect"} masteries in; `avoid` keeps nodes out). `points` adds that many points
     to the current count (default: fill to the level's budget).
 
+    Each step changes at most `swap_radius` allocated nodes and adds at most `fill_step`
+    points beyond that; only nodes within that reach of the tree are measured, which keeps
+    each integer program small enough to solve well in `mip_seconds`.
     A run takes a few minutes (each re-measure is a few thousand PoB calculations). The result
     has start/final stats, ratios, what was added and removed, and the per-iteration history.
     undo_last_change reverts it.
@@ -720,7 +724,7 @@ def optimize_tree(
     opt = TreeOptimizer(e, mode=mode, metric=metric, targets=targets, points=points, keep=keep,
                         require=require, avoid=avoid, include_keystones=include_keystones,
                         weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,
-                        swap_radius=swap_radius)
+                        swap_radius=swap_radius, fill_step=fill_step)
     res = opt.run()
     _history.append(snapshot)
     del _history[:-_MAX_HISTORY]

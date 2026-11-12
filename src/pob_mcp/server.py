@@ -728,6 +728,8 @@ def optimize_tree(
     mip_seconds = max(1, min(mip_seconds, 120, max_seconds))
     swap_radius = max(1, min(swap_radius, 12))
     fill_step = max(1, min(fill_step, 20))
+    if points is not None:
+        points = max(0, min(int(points), 150))  # a full tree is 123 points plus quest/jewel extras
 
     opt = TreeOptimizer(e, mode=mode, metric=metric, targets=targets, points=points, keep=keep,
                         require=require, avoid=avoid, include_keystones=include_keystones,

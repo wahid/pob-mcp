@@ -76,7 +76,9 @@ class TreeOptimizer:
     swap_radius: int = 8
     fill_step: int = 10
     reach: int | None = None
-    mip_seconds: float = 30
+    mip_seconds: float = 10
+    stall_seconds: float = 3
+    min_gain: float = 0.003
     weights: dict[str, float] | None = None
     log: object = None
     history: list = field(default_factory=list)
@@ -249,6 +251,7 @@ class TreeOptimizer:
 
         # weakest max hit: z <= (b_k + delta_k - bmin) / bmin for every type
         z = None
+        bmin = 1.0
         if hit_is:
             bmin = max(min(base[stats[i]] for i in hit_is), 1.0)
             z = var(-np.inf, 10.0, w["hit"])
@@ -337,71 +340,221 @@ class TreeOptimizer:
         h.addRows(len(rows), np.array(lower), np.array(upper), len(index),
                   np.array(starts, dtype=np.int32), np.array(index, dtype=np.int32), np.array(value))
         h.changeObjectiveSense(highspy.ObjSense.kMaximize)
-        # warm start from the current tree: flows along a BFS tree from the class start
-        start = np.zeros(n)
-        for k, r in enumerate(nodes):
-            if r["alloc"] or r["type"] == "ClassStart":
+        # warm start: the current tree, extended greedily along the linear model so the
+        # solver starts from a good tree instead of having to find one itself
+        cur_on = {k for k, r in enumerate(nodes) if r["alloc"] or r["type"] == "ClassStart"}
+        cur_sel = {k: m["e"] for k, r in enumerate(nodes) for m in (r.get("m") or []) if m.get("sel")}
+        on, sel = self._greedy(nodes, idx, base, cur_on, cur_sel, dist, adj,
+                               min(add_radius if add_radius is not None else 10 ** 9,
+                                   budget - sum(1 for k in cur_on if nodes[k]["type"] != "ClassStart")))
+
+        def build_start(on, sel):
+            start = np.zeros(n)
+            for k in on:
                 start[x[k]] = 1
-            for m in r.get("m") or []:
-                if m.get("sel"):
-                    start[y[(k, m["e"])][0]] = 1
-        for s, v in slacks:
-            start[s] = v
-        if z is not None:
-            start[z] = 0.0
-        on = {k for k, r in enumerate(nodes) if r["alloc"] or r["type"] == "ClassStart"}
-        parent, order = {}, []
-        roots = [k for k in root_arc if k in on]
-        seen = set(roots)
-        queue = list(roots)
-        while queue:
-            k = queue.pop(0)
-            order.append(k)
-            for j in adj.get(k, []):
-                if j in on and j not in seen:
-                    seen.add(j)
-                    parent[j] = k
-                    queue.append(j)
-        size = {k: 1 for k in order}
-        for k in reversed(order):
-            if k in parent:
-                size[parent[k]] += size[k]
-        warm_ok = seen == on
-        for k in order:
-            if k in parent:
-                start[arcs[(parent[k], k)]] = size[k]
-            else:
-                start[root_arc[k]] = size[k]
-                if nodes[k]["type"] != "ClassStart" and size[k] > 1:
-                    warm_ok = False  # a leap node feeding others: not a valid start
-        bad = []
-        for c in range(n):
-            if start[c] < lb[c] - 1e-7 or start[c] > ub[c] + 1e-7:
-                bad.append(f"bound of column {c}")
-        for (cols, vals, lo, hi), tag in zip(rows, tags):
-            a = float(sum(start[c] * v for c, v in zip(cols, vals)))
-            if a < lo - 1e-6 or a > hi + 1e-6:
-                bad.append(f"{tag}: {a:.3f} not in [{lo}, {hi}]")
-        if bad:
-            warm_ok = False
+            for k, e in sel.items():
+                start[y[(k, e)][0]] = 1
+            D = self._delta(nodes, len(stats), on - cur_on, cur_on - on, sel, cur_sel)
+            for (s_col, _), c in zip(slacks, [c for c in self.constraints if c.stat in idx]):
+                start[s_col] = max(0.0, c.target - base[c.stat] - D[idx[c.stat]])
+            if z is not None:
+                start[z] = min(10.0, min((base[stats[i]] - bmin + D[i]) / bmin for i in hit_is))
+            parent, order = {}, []
+            roots = [k for k in root_arc if k in on]
+            seen = set(roots)
+            queue = list(roots)
+            while queue:
+                k = queue.pop(0)
+                order.append(k)
+                if nodes[k]["type"] == "Mastery":
+                    continue
+                for j in adj.get(k, []):
+                    if j in on and j not in seen:
+                        seen.add(j)
+                        parent[j] = k
+                        queue.append(j)
+            size = {k: 1 for k in order}
+            for k in reversed(order):
+                if k in parent:
+                    size[parent[k]] += size[k]
+            ok = seen == on
+            for k in order:
+                if k in parent:
+                    start[arcs[(parent[k], k)]] = size[k]
+                else:
+                    start[root_arc[k]] = size[k]
+                    if nodes[k]["type"] != "ClassStart" and size[k] > 1:
+                        ok = False  # a leap node feeding others: not a valid start
+            bad = []
+            for c in range(n):
+                if start[c] < lb[c] - 1e-7 or start[c] > ub[c] + 1e-7:
+                    bad.append(f"bound of column {c}")
+            for (cols, vals, lo, hi), tag in zip(rows, tags):
+                a = float(sum(start[c] * v for c, v in zip(cols, vals)))
+                if a < lo - 1e-6 or a > hi + 1e-6:
+                    bad.append(f"{tag}: {a:.3f} not in [{lo}, {hi}]")
+            return start, ok and not bad, bad
+
+        start, warm_ok, bad = build_start(on, sel)
+        greedy_used = warm_ok and on != cur_on
+        if not warm_ok and on != cur_on:
+            start, warm_ok, bad = build_start(cur_on, cur_sel)
         if warm_ok:
             sol0 = highspy.HighsSolution()
             sol0.col_value = list(start)
             sol0.value_valid = True
             h.setSolution(sol0)
+        # Stop once the incumbent has not improved for stall_seconds: the solver usually
+        # finds its tree in a second or two and spends the rest proving optimality.
         t0 = time.time()
+        inc = {"t": t0, "obj": None, "sol": None}
+
+        def improved(ev):
+            obj = ev.data_out.objective_function_value
+            if inc["obj"] is None or obj > inc["obj"] + 1e-4 * max(1.0, abs(inc["obj"])):
+                inc["t"] = time.time()
+            inc["obj"] = obj
+            inc["sol"] = list(ev.data_out.mip_solution)
+
+        def interrupt(ev):
+            if inc["sol"] is not None and time.time() - inc["t"] > self.stall_seconds:
+                ev.interrupt = True
+
+        try:
+            h.cbMipImprovingSolution.subscribe(improved)
+            h.cbMipInterrupt.subscribe(interrupt)
+        except AttributeError:  # older highspy: plain time limit
+            pass
         h.run()
         status = h.modelStatusToString(h.getModelStatus())
         sol = h.getSolution().col_value
         if not sol or len(sol) < n or h.getInfo().primal_solution_status != 2:
-            return None, {"status": status, "warm": warm_ok, "warm_problems": bad[:5] or None}
+            if inc["sol"] is not None and len(inc["sol"]) >= n:
+                sol, status = inc["sol"], "stalled"  # interrupted: use the last incumbent
+            else:
+                return None, {"status": status, "warm": warm_ok, "warm_problems": bad[:5] or None}
         chosen = [nodes[k]["id"] for k in range(len(nodes))
                   if sol[x[k]] > 0.5 and nodes[k]["type"] != "ClassStart"]
         mast = {nodes[k]["id"]: e for (k, e), (v, _) in y.items() if sol[v] > 0.5}
         info = {"status": status, "seconds": round(time.time() - t0, 1), "vars": n, "rows": len(rows), "warm": warm_ok,
+                "greedy_adds": len(on - cur_on) if greedy_used else 0,
                 "warm_problems": bad[:5] or None,
-                "objective": h.getInfo().objective_function_value}
+                "objective": inc["obj"] if status == "stalled" else h.getInfo().objective_function_value}
         return (chosen, mast), info
+
+    # -- greedy start for the solver ----------------------------------------------------
+    def _delta(self, nodes, nstat, added, removed, sel, cur_sel):
+        """Linear stat change (per stat index) of a tree relative to the current one."""
+        D = [0.0] * nstat
+
+        def acc(d, sign):
+            if d:
+                for i, v in enumerate(d):
+                    if v:
+                        D[i] += sign * v
+        for k in added:
+            acc(nodes[k].get("d"), 1)
+        for k in removed:
+            acc(nodes[k].get("d"), -1)
+        for k, e in cur_sel.items():
+            if sel.get(k) != e:
+                acc(next(m for m in nodes[k]["m"] if m["e"] == e).get("d"), -1)
+        for k, e in sel.items():
+            if cur_sel.get(k) != e:
+                acc(next(m for m in nodes[k]["m"] if m["e"] == e).get("d"), 1)
+        return D
+
+    def _lin_utility(self, D, idx, base):
+        w = self._weights()
+        stats = list(idx)
+        rel = lambda s: 1.0 / max(abs(base[s]), 1.0)
+        u = 0.0
+        if self.dps_stat in idx:
+            u += w["dps"] * D[idx[self.dps_stat]] * rel(self.dps_stat)
+        if "TotalEHP" in idx:
+            u += w["ehp"] * D[idx["TotalEHP"]] * rel("TotalEHP")
+        hit_is = [idx[h] for h in self.hit_stats if h in idx]
+        if hit_is:
+            bmin = max(min(base[stats[i]] for i in hit_is), 1.0)
+            u += w["hit"] * min(10.0, min((base[stats[i]] - bmin + D[i]) / bmin for i in hit_is))
+        for c in self.constraints:
+            if c.stat in idx:
+                u -= PENALTY / c.scale * max(0.0, c.target - base[c.stat] - D[idx[c.stat]])
+        return u
+
+    def _greedy(self, nodes, idx, base, on, sel, dist, adj, adds, depth=4):
+        """Add the best short path (gain per point) repeatedly while it helps."""
+        on, sel = set(on), dict(sel)
+        cur_on, cur_sel = set(on), dict(sel)
+        used_eff = set(sel.values())
+        nstat = len(idx)
+        D = [0.0] * nstat
+        u = self._lin_utility(D, idx, base)
+
+        def node_gain(k, D):
+            r = nodes[k]
+            best, eff = None, None
+            d = r.get("d") or [0.0] * nstat
+            if r.get("m"):
+                for m in r["m"]:
+                    if m["e"] in used_eff:
+                        continue
+                    dm = m.get("d") or [0.0] * nstat
+                    D2 = [a + b + c for a, b, c in zip(D, d, dm)]
+                    v = self._lin_utility(D2, idx, base)
+                    if best is None or v > best[0]:
+                        best, eff = (v, D2), m["e"]
+                return (best or (None, None)), eff
+            D2 = [a + b for a, b in zip(D, d)]
+            return (self._lin_utility(D2, idx, base), D2), None
+
+        left = adds
+        while left > 0:
+            # BFS outward from the tree through unallocated, reachable, allowed nodes
+            prev = {}
+            frontier = [k for k in on if nodes[k]["type"] != "Mastery"]
+            seen = set(on)
+            layers = []
+            for _ in range(min(depth, left)):
+                nxt = []
+                for k in frontier:
+                    for j in adj.get(k, []):
+                        r = nodes[j]
+                        if j in seen or j not in dist or r.get("avoid"):
+                            continue
+                        seen.add(j)
+                        prev[j] = k
+                        nxt.append(j)
+                layers.append(nxt)
+                frontier = [j for j in nxt if nodes[j]["type"] != "Mastery"]
+            best = None
+            for L, layer in enumerate(layers, 1):
+                for j in layer:
+                    path, k = [], j
+                    while k not in on:
+                        path.append(k)
+                        k = prev[k]
+                    Dp = D
+                    for q in path[1:]:
+                        d = nodes[q].get("d")
+                        if d:
+                            Dp = [a + b for a, b in zip(Dp, d)]
+                    (v, D2), eff = node_gain(j, Dp)
+                    if v is None:
+                        continue
+                    rate = (v - u) / L
+                    if rate > 1e-9 and (best is None or rate > best[0]):
+                        best = (rate, path, eff, v, D2)
+            if best is None:
+                break
+            _, path, eff, u, D = best
+            for q in path:
+                on.add(q)
+            if eff is not None:
+                sel[path[0]] = eff
+                used_eff.add(eff)
+            left -= len(path)
+        return on, sel
 
     # -- main loop ------------------------------------------------------------------------
     def _say(self, msg):
@@ -492,12 +645,17 @@ class TreeOptimizer:
             entry = {"iter": it, "radius": radius, "utility": round(u, 5), "dps": out["stats"].get(self.dps_stat),
                      "ehp": out["stats"].get("TotalEHP"), "solver": info}
             if u > cur.utility + 1e-5:
+                gain = u - cur.utility
                 cur = _State(nodes, mast, out["stats"], u)
                 if u > best.utility:
                     best = cur
                 entry["result"] = "accepted"
                 self.history.append(entry)
                 self._say(f"iteration {it}: accepted, utility {u:.4f}, {self.dps_stat} {entry['dps']}")
+                # diminishing returns: every point is spent and the step barely helped
+                if gain < self.min_gain and len(nodes) + model["excludedPoints"] >= self.total_points:
+                    notes.append(f"stopped after iteration {it}: gain {gain:.4f} below {self.min_gain}")
+                    break
                 model = self._measure()
                 measured += 1
                 radius = max(radius, self.swap_radius)

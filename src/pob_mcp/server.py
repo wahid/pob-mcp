@@ -682,7 +682,7 @@ def optimize_tree(
     include_keystones: bool = False,
     weights: dict[str, float] | None = None,
     max_seconds: int = 900,
-    mip_seconds: int = 30,
+    mip_seconds: int = 10,
     swap_radius: int = 8,
     fill_step: int = 10,
 ) -> dict:

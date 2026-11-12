@@ -721,6 +721,14 @@ def optimize_tree(
     e = _engine()
     e.require_build()
     snapshot = e.call("export_xml")["xml"]
+
+    # Server-side safety caps for untrusted tool callers.
+    # Keep defaults unchanged while preventing runaway requests.
+    max_seconds = max(1, min(max_seconds, 900))
+    mip_seconds = max(1, min(mip_seconds, 120, max_seconds))
+    swap_radius = max(1, min(swap_radius, 12))
+    fill_step = max(1, min(fill_step, 20))
+
     opt = TreeOptimizer(e, mode=mode, metric=metric, targets=targets, points=points, keep=keep,
                         require=require, avoid=avoid, include_keystones=include_keystones,
                         weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,

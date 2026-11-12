@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0
+
+New tools
+- `optimize_tree`: exact optimiser for the whole passive tree. PoB measures every node and
+  mastery effect, an integer program (HiGHS) picks the best connected tree within the
+  points, PoB recalculates it, repeat. `mode` dps / balanced / defence (or your own
+  `weights`), with `targets`, `require`, `avoid`, `keep`; rebuilds an existing tree as well
+  as filling an empty one. `apply=false` previews the plan and leaves the build as it was.
+  On the 19-build tree-rebuild benchmark it matches 17 (median 1.18x the original DPS,
+  about 4 minutes per build).
+- `target_report`: per target stat its value, slack, cap and over-cap, which allocated picks
+  hold it up, and its modifier sources; tightest first.
+- `compare_trees`: diff only the passive trees of the loaded build and another, with stat
+  ratios.
+
+Optimiser (`auto_allocate_passives`)
+- `require`: nodes or `{node, effect}` masteries forced in first; they stay through LNS.
+- `profile=true` reports how many PoB recalculations a run made and what they cost.
+- LNS: can start from the current tree, keep chosen nodes, search from a tree that misses
+  its targets, re-pick mastery effects, randomised multi-refill and region moves; ends on the
+  best tree seen.
+
+Other
+- New dependencies: `highspy` and `numpy`.
+- Tool inputs that set run time or problem size are capped on the server.
+- CI workflows run with a read-only `GITHUB_TOKEN`.
+- Tree-rebuild benchmark: `--jobs N` runs builds in parallel, one PoB per process.
+
 ## 0.5.0
 
 Published on PyPI as `pathofbuilding-mcp` (`pip install pathofbuilding-mcp`); the command is

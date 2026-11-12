@@ -48,6 +48,17 @@ def test_server_over_stdio(sample_xml):
                 res = await s.call_tool("render_tree", {"width": 500})
                 assert any(getattr(c, "type", "") == "image" for c in res.content)
 
+                # optimize_tree preview: reports the plan, leaves the build untouched
+                before = json.loads((await s.call_tool("get_build_summary", {})).content[0].text)
+                res = await s.call_tool("optimize_tree", {"mode": "dps", "points": 3, "apply": False,
+                                                          "max_seconds": 20, "swap_radius": 2,
+                                                          "fill_step": 3})
+                assert not getattr(res, "is_error", getattr(res, "isError", False)), res.content[0].text
+                plan = json.loads(res.content[0].text)
+                assert plan["applied"] is False
+                after = json.loads((await s.call_tool("get_build_summary", {})).content[0].text)
+                assert after["passivePointsUsed"] == before["passivePointsUsed"]
+
     _run(go())
 
 

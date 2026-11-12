@@ -74,7 +74,7 @@ for the same build and config.
 | `list_item_slots` | Gear slots plus allocated tree jewel sockets |
 | `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards; also picks mastery effects, sockets planned `jewels`, and can `anoint`. `require` forces nodes (or `{node, effect}` masteries) in first, and they stay through LNS |
 | `target_report` | For each target stat: value, slack, cap and over-cap, which allocated picks hold it up, and its modifier sources; tightest first |
-| `optimize_tree` | Exact optimiser for the whole tree: `mode` dps / balanced / defence. PoB measures every node and mastery effect, an integer program (HiGHS) picks the best connected tree within the points, PoB recalculates it, repeat. Rebuilds an existing tree as well as filling an empty one; `targets`, `require`, `avoid`, `keep` |
+| `optimize_tree` | Exact optimiser for the whole tree: `mode` dps / balanced / defence. PoB measures every node and mastery effect, an integer program (HiGHS) picks the best connected tree within the points, PoB recalculates it, repeat. Rebuilds an existing tree as well as filling an empty one; `targets`, `require`, `avoid`, `keep`; `apply=false` previews without changing the build |
 | `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree, most valuable nodes first |
 | `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
 | `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |

@@ -685,6 +685,7 @@ def optimize_tree(
     mip_seconds: int = 10,
     swap_radius: int = 8,
     fill_step: int = 10,
+    apply: bool = True,
 ) -> dict:
     """Re-optimise the whole passive tree with an exact solver (integer programming) instead of
     the greedy one. Unlike auto_allocate_passives it sees long paths, swaps whole regions, and
@@ -714,7 +715,8 @@ def optimize_tree(
     each integer program small enough to solve well in `mip_seconds`.
     A run takes a few minutes (each re-measure is a few thousand PoB calculations). The result
     has start/final stats, ratios, what was added and removed, and the per-iteration history.
-    undo_last_change reverts it.
+    undo_last_change reverts it. With `apply=false` it is a preview: the result is the same, but
+    the build is put back as it was (nothing to undo).
     """
     from .optimizer import TreeOptimizer
 
@@ -735,9 +737,18 @@ def optimize_tree(
                         require=require, avoid=avoid, include_keystones=include_keystones,
                         weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,
                         swap_radius=swap_radius, fill_step=fill_step)
-    res = opt.run()
-    _history.append(snapshot)
-    del _history[:-_MAX_HISTORY]
+    try:
+        res = opt.run()
+    except Exception:
+        if not apply:
+            e.call("load_xml", {"xml": snapshot, "name": "Build"})
+        raise
+    res["applied"] = apply
+    if apply:
+        _history.append(snapshot)
+        del _history[:-_MAX_HISTORY]
+    else:
+        e.call("load_xml", {"xml": snapshot, "name": "Build"})
     res["undo_available"] = len(_history)
     return res
 

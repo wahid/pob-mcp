@@ -407,17 +407,23 @@ class TreeOptimizer:
         # Stop once the incumbent has not improved for stall_seconds: the solver usually
         # finds its tree in a second or two and spends the rest proving optimality.
         t0 = time.time()
-        inc = {"t": t0, "obj": None, "sol": None}
+        # The stall clock only runs once the solver has beaten the warm start; until then it
+        # gets the full mip_seconds to find a swap.
+        start_obj = float(np.dot(np.array(cost), start)) if warm_ok else None
+        inc = {"t": t0, "obj": None, "sol": None, "beat": False}
 
         def improved(ev):
             obj = ev.data_out.objective_function_value
-            if inc["obj"] is None or obj > inc["obj"] + 1e-4 * max(1.0, abs(inc["obj"])):
+            tol = 1e-4 * max(1.0, abs(obj))
+            if inc["obj"] is None or obj > inc["obj"] + tol:
                 inc["t"] = time.time()
+            if start_obj is None or obj > start_obj + tol:
+                inc["beat"] = True
             inc["obj"] = obj
             inc["sol"] = list(ev.data_out.mip_solution)
 
         def interrupt(ev):
-            if inc["sol"] is not None and time.time() - inc["t"] > self.stall_seconds:
+            if inc["sol"] is not None and inc["beat"] and time.time() - inc["t"] > self.stall_seconds:
                 ev.interrupt = True
 
         try:

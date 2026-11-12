@@ -344,7 +344,8 @@ class TreeOptimizer:
         # solver starts from a good tree instead of having to find one itself
         cur_on = {k for k, r in enumerate(nodes) if r["alloc"] or r["type"] == "ClassStart"}
         cur_sel = {k: m["e"] for k, r in enumerate(nodes) for m in (r.get("m") or []) if m.get("sel")}
-        on, sel = self._greedy(nodes, idx, base, cur_on, cur_sel, dist, adj,
+        roots_main = [k for k in root_arc if nodes[k]["type"] == "ClassStart" or nodes[k].get("entry")]
+        on, sel = self._greedy(nodes, idx, base, cur_on, cur_sel, dist, adj, roots_main,
                                min(add_radius if add_radius is not None else 10 ** 9,
                                    budget - sum(1 for k in cur_on if nodes[k]["type"] != "ClassStart")))
 
@@ -360,19 +361,26 @@ class TreeOptimizer:
             if z is not None:
                 start[z] = min(10.0, min((base[stats[i]] - bmin + D[i]) / bmin for i in hit_is))
             parent, order = {}, []
-            roots = [k for k in root_arc if k in on]
-            seen = set(roots)
-            queue = list(roots)
-            while queue:
-                k = queue.pop(0)
-                order.append(k)
-                if nodes[k]["type"] == "Mastery":
-                    continue
-                for j in adj.get(k, []):
-                    if j in on and j not in seen:
-                        seen.add(j)
-                        parent[j] = k
-                        queue.append(j)
+            main = [k for k in root_arc if k in on and (nodes[k]["type"] == "ClassStart" or nodes[k].get("entry"))]
+            leaps = [k for k in root_arc if k in on and k not in main]
+            seen = set(main)
+            queue = list(main)
+            while True:
+                while queue:
+                    k = queue.pop(0)
+                    order.append(k)
+                    if nodes[k]["type"] == "Mastery":
+                        continue
+                    for j in adj.get(k, []):
+                        if j in on and j not in seen:
+                            seen.add(j)
+                            parent[j] = k
+                            queue.append(j)
+                rest = [k for k in leaps if k not in seen]
+                if not rest:
+                    break
+                seen.add(rest[0])
+                queue = [rest[0]]
             size = {k: 1 for k in order}
             for k in reversed(order):
                 if k in parent:
@@ -388,7 +396,7 @@ class TreeOptimizer:
             bad = []
             for c in range(n):
                 if start[c] < lb[c] - 1e-7 or start[c] > ub[c] + 1e-7:
-                    bad.append(f"bound of column {c}")
+                    bad.append(f"bound of column {c}: {start[c]} not in [{lb[c]}, {ub[c]}]")
             for (cols, vals, lo, hi), tag in zip(rows, tags):
                 a = float(sum(start[c] * v for c, v in zip(cols, vals)))
                 if a < lo - 1e-6 or a > hi + 1e-6:
@@ -397,7 +405,9 @@ class TreeOptimizer:
 
         start, warm_ok, bad = build_start(on, sel)
         greedy_used = warm_ok and on != cur_on
+        greedy_problems = None
         if not warm_ok and on != cur_on:
+            greedy_problems = bad[:5]
             start, warm_ok, bad = build_start(cur_on, cur_sel)
         if warm_ok:
             sol0 = highspy.HighsSolution()
@@ -443,7 +453,7 @@ class TreeOptimizer:
                   if sol[x[k]] > 0.5 and nodes[k]["type"] != "ClassStart"]
         mast = {nodes[k]["id"]: e for (k, e), (v, _) in y.items() if sol[v] > 0.5}
         info = {"status": status, "seconds": round(time.time() - t0, 1), "vars": n, "rows": len(rows), "warm": warm_ok,
-                "greedy_adds": len(on - cur_on) if greedy_used else 0,
+                "greedy_adds": len(on - cur_on) if greedy_used else 0, "greedy_problems": greedy_problems,
                 "warm_problems": bad[:5] or None,
                 "objective": inc["obj"] if status == "stalled" else h.getInfo().objective_function_value}
         return (chosen, mast), info
@@ -488,7 +498,7 @@ class TreeOptimizer:
                 u -= PENALTY / c.scale * max(0.0, c.target - base[c.stat] - D[idx[c.stat]])
         return u
 
-    def _greedy(self, nodes, idx, base, on, sel, dist, adj, adds, depth=4):
+    def _greedy(self, nodes, idx, base, on, sel, dist, adj, roots, adds, depth=4):
         """Add the best short path (gain per point) repeatedly while it helps."""
         on, sel = set(on), dict(sel)
         cur_on, cur_sel = set(on), dict(sel)
@@ -518,7 +528,17 @@ class TreeOptimizer:
         while left > 0:
             # BFS outward from the tree through unallocated, reachable, allowed nodes
             prev = {}
-            frontier = [k for k in on if nodes[k]["type"] != "Mastery"]
+            # grow only from the part of the tree connected to the class start (leap nodes
+            # may carry a single unit of flow, so nothing can hang off them)
+            conn, stack = set(), [k for k in roots if k in on]
+            while stack:
+                k = stack.pop()
+                if k in conn:
+                    continue
+                conn.add(k)
+                if nodes[k]["type"] != "Mastery":
+                    stack.extend(j for j in adj.get(k, []) if j in on)
+            frontier = [k for k in conn if nodes[k]["type"] != "Mastery"]
             seen = set(on)
             layers = []
             for _ in range(min(depth, left)):

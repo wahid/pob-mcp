@@ -186,6 +186,9 @@ class TreeOptimizer:
 
         # distance from the current tree: further than add_radius can't be reached this step
         dist = {k: 0 for k, r in enumerate(nodes) if r["alloc"] or r["type"] == "ClassStart"}
+        for k, r in enumerate(nodes):
+            if r.get("entry") and k not in dist:
+                dist[k] = 1
         frontier = list(dist)
         while frontier and add_radius is not None:
             nxt = []
@@ -300,7 +303,7 @@ class TreeOptimizer:
                 row([f, x[k]], [1.0, -M], -np.inf, 0, "arc")
         for k, r in enumerate(nodes):
             cap = None
-            if r["type"] == "ClassStart":
+            if r["type"] == "ClassStart" or r.get("entry"):
                 cap = M
             elif r.get("leap") or (r["fixed"] and not r["links"]):
                 cap = 1.0
@@ -390,8 +393,8 @@ class TreeOptimizer:
         h.run()
         status = h.modelStatusToString(h.getModelStatus())
         sol = h.getSolution().col_value
-        if not sol or len(sol) < n:
-            return None, {"status": status}
+        if not sol or len(sol) < n or h.getInfo().primal_solution_status != 2:
+            return None, {"status": status, "warm": warm_ok, "warm_problems": bad[:5] or None}
         chosen = [nodes[k]["id"] for k in range(len(nodes))
                   if sol[x[k]] > 0.5 and nodes[k]["type"] != "ClassStart"]
         mast = {nodes[k]["id"]: e for (k, e), (v, _) in y.items() if sol[v] > 0.5}

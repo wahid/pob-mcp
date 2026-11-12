@@ -5313,8 +5313,11 @@ function API.tree_model(p)
 	local function inModel(node)
 		if node.ascendancyName or node.isProxy or node.expansionSkill then return false end
 		if node.id >= 65536 then return false end
+		-- sockets inside a cluster jewel reuse tree socket ids but hang off the cluster
+		if node.expansionJewel and node.expansionJewel.parent then return false end
 		if node.type == "AscendClassStart" then return false end
-		if node.type == "ClassStart" then return node.id == startId end
+		-- an allocated start of another class is a root too (Ascendant's "Path of the ...")
+		if node.type == "ClassStart" then return node.id == startId or node.alloc == true end
 		if granted[node.id] and not node.alloc then return false end
 		if node.type == "Keystone" and not node.alloc and not p.include_keystones and not req[node.id] then return false end
 		if node.type == "Mastery" and node.overrideType ~= "AlternateMastery" and not (node.masteryEffects and #node.masteryEffects > 0) then return false end
@@ -5362,6 +5365,13 @@ function API.tree_model(p)
 			avoid = avoid[id] and true or nil, links = links,
 			leap = (node.intuitiveLeapLikesAffecting and #node.intuitiveLeapLikesAffecting > 0) or nil,
 		}
+		-- a main-tree node next to an allocated ascendancy node (Ascendant's "Path of the ...")
+		-- is a starting point: PoB paths through the ascendancy to the class start
+		if node.type ~= "ClassStart" then
+			for _, o in ipairs(node.linked) do
+				if o.alloc and o.ascendancyName then row.entry = true break end
+			end
+		end
 		if node.type == "ClassStart" or node.type == "Socket" then
 			-- no stats of their own
 		elseif node.type == "Mastery" and node.overrideType ~= "AlternateMastery" then
@@ -5437,7 +5447,8 @@ function API.set_tree(p)
 	local startId = spec.curClass.startNodeId
 	for _, id in ipairs(state.hashList) do
 		local node = spec.nodes[id]
-		if not node or node.ascendancyName or id >= 65536 or node.type == "AscendClassStart" or id == startId then
+		if not node or node.ascendancyName or id >= 65536 or node.type == "AscendClassStart" or node.type == "ClassStart"
+			or (node.expansionJewel and node.expansionJewel.parent) then
 			keepList[#keepList + 1] = id
 			if spec.masterySelections[id] then keepMast[id] = spec.masterySelections[id] end
 		end

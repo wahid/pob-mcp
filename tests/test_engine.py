@@ -460,3 +460,11 @@ def test_compare_trees(deadeye):
     assert "Heartseeker" in res["current"]["notables"]
     assert res["points"]["current"] > res["points"]["other"]
     assert "Heartseeker" in deadeye.call("tree")["notables"]  # current build kept
+
+
+def test_auto_allocate_profile(deadeye):
+    res = deadeye.call("auto_allocate", {"points": 12, "weights": {"CombinedDPS": 1}, "profile": True})
+    prof = res["profile"]
+    assert prof["calcs"] > 0 and 0 < prof["calcShare"] <= 1
+    # the calculator is restored afterwards
+    assert "profile" not in deadeye.call("auto_allocate", {"points": 1, "weights": {"CombinedDPS": 1}})

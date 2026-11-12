@@ -2449,7 +2449,44 @@ local function allocateRequired(p)
 	return ids, spent, notes
 end
 
+local autoAllocateMain
 function API.auto_allocate(p)
+	-- profile: count PoB recalculations and the time they take during this call
+	local calcsTab, had, prof = B().calcsTab, nil, nil
+	if p.profile then
+		had = rawget(calcsTab, "GetMiscCalculator")
+		local orig = calcsTab.GetMiscCalculator
+		prof = { calcs = 0, calcSeconds = 0, calculators = 0 }
+		local t0 = os.clock()
+		rawset(calcsTab, "GetMiscCalculator", function(self, ...)
+			prof.calculators = prof.calculators + 1
+			local t = os.clock()
+			local f, base = orig(self, ...)
+			prof.calcSeconds = prof.calcSeconds + (os.clock() - t)
+			return function(...)
+				local t1 = os.clock()
+				local r = f(...)
+				prof.calcs = prof.calcs + 1
+				prof.calcSeconds = prof.calcSeconds + (os.clock() - t1)
+				return r
+			end, base
+		end)
+		prof.t0 = t0
+	end
+	local ok, res = pcall(autoAllocateMain, p)
+	if prof then
+		rawset(calcsTab, "GetMiscCalculator", had)
+		prof.totalSeconds = os.clock() - prof.t0
+		prof.t0 = nil
+		prof.msPerCalc = prof.calcs > 0 and math.floor(prof.calcSeconds / prof.calcs * 1e5 + 0.5) / 100 or nil
+		prof.calcShare = prof.totalSeconds > 0 and math.floor(prof.calcSeconds / prof.totalSeconds * 1000 + 0.5) / 1000 or nil
+		if ok and type(res) == "table" then res.profile = prof end
+	end
+	if not ok then error(res, 0) end
+	return res
+end
+
+autoAllocateMain = function(p)
 	local requiredIds, requiredSpent, requiredNotes
 	if p.require and #p.require > 0 then
 		requiredIds, requiredSpent, requiredNotes = allocateRequired(p)

@@ -150,6 +150,27 @@ def score(r: dict, dps_share: float, hit_share: float) -> dict:
             "beatsOriginal": valid and dps >= 1 and worst_hit >= hit_share}
 
 
+_ENGINES: dict = {}
+
+
+def _rebuild(path, pob_path, max_seconds, hit_target, max_path_cost, lns_rounds, strategies, lns_seconds,
+             save_dir, dps_share, hit_share):
+    """Rebuild one build; with --jobs each worker process keeps its own engine."""
+    e = _ENGINES.get(pob_path)
+    if e is None:
+        e = _ENGINES[pob_path] = PobEngine(pob_path)
+    try:
+        r = run_one(e, path, max_seconds, hit_target, max_path_cost, lns_rounds, strategies, lns_seconds)
+        if save_dir:
+            Path(save_dir).mkdir(parents=True, exist_ok=True)
+            Path(save_dir, Path(path).stem + ".rebuilt.xml").write_text(e.call("export_xml")["xml"], encoding="utf-8")
+        r["score"] = score(r, dps_share, hit_share)
+    except Exception as ex:  # keep going
+        r = {"build": Path(path).stem, "error": str(ex)}
+    r["path"] = path
+    return r
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("builds", nargs="+")
@@ -164,25 +185,38 @@ def main():
     ap.add_argument("--strategies", default="all", help="comma list: targets-first, blend, targets-first+small, slack, repair")
     ap.add_argument("--save-dir", default=None, help="save each rebuilt build here as XML")
     ap.add_argument("--hit-share", type=float, default=0.95)
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="rebuild this many builds at once, each in its own process (one per CPU core)")
     a = ap.parse_args()
-    e = PobEngine(a.pob_path)
+    # the engine chdirs into PoB's src folder: make every path absolute first
+    builds = [str(Path(b).resolve()) for b in a.builds]
+    out = Path(a.out).resolve()
+    save_dir = str(Path(a.save_dir).resolve()) if a.save_dir else None
+    args = (a.pob_path, a.max_seconds, a.hit_target, a.max_path_cost, a.lns_rounds, a.strategies,
+            a.lns_seconds, save_dir, a.dps_share, a.hit_share)
     results = []
-    for path in a.builds:
-        try:
-            r = run_one(e, path, a.max_seconds, a.hit_target, a.max_path_cost, a.lns_rounds, a.strategies, a.lns_seconds)
-            if a.save_dir:
-                Path(a.save_dir).mkdir(parents=True, exist_ok=True)
-                e.call("export_xml") and Path(a.save_dir, Path(path).stem + ".rebuilt.xml").write_text(
-                    e.call("export_xml")["xml"], encoding="utf-8")
-            r["score"] = score(r, a.dps_share, a.hit_share)
+
+    def report(r):
+        if "error" in r:
+            print(f"{r['build']:14s} ERROR {r['error']}", flush=True)
+        else:
             s = r["score"]
             print(f"{r['build']:14s} {r['metric']:18s} DPS {s['dps']:.2f}  worst hit {s['worstHit']:.2f}  "
                   f"{'MATCH' if s['match'] else ('INVALID' if not s['valid'] else 'miss ')}  ({r['budget']} pts, {r['seconds']}s)", flush=True)
-        except Exception as ex:  # keep going
-            r = {"build": Path(path).stem, "error": str(ex)}
-            print(f"{r['build']:14s} ERROR {ex}", flush=True)
         results.append(r)
-        Path(a.out).write_text(json.dumps(results, indent=1))
+        order = {b: i for i, b in enumerate(builds)}
+        results.sort(key=lambda x: order.get(x.get("path"), 0))
+        out.write_text(json.dumps(results, indent=1))
+
+    if a.jobs <= 1:
+        for path in builds:
+            report(_rebuild(path, *args))
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        with ProcessPoolExecutor(max_workers=a.jobs) as pool:
+            futures = [pool.submit(_rebuild, path, *args) for path in builds]
+            for f in as_completed(futures):
+                report(f.result())
     ok = [r for r in results if "score" in r]
     if ok:
         matches = sum(r["score"]["match"] for r in ok)

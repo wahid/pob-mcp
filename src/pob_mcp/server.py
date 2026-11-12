@@ -591,6 +591,7 @@ def auto_allocate_passives(
     lns_rounds: int = 0,
     lns_seconds: int = 120,
     require: list[str | int | dict[str, Any]] | None = None,
+    profile: bool = False,
 ) -> dict:
     """Spend passive points automatically with a greedy optimiser that uses PoB's calculator.
 
@@ -649,6 +650,9 @@ def auto_allocate_passives(
     text or id). They are allocated nearest first so their paths share nodes, paid for out of
     `points`, and the LNS never drops them; `required` in the result shows their cost. Use it
     for the picks a build is built around: the optimiser fills the rest under the targets.
+
+    profile=true adds `profile`: how many PoB recalculations the run made, their average cost
+    and their share of the run time.
     """
     snapshot = _call("export_xml")["xml"]
     res = _call("auto_allocate", {
@@ -658,6 +662,7 @@ def auto_allocate_passives(
         "masteries": masteries, "jewels": jewels or [], "anoint": anoint, "fast": fast,
         "target_weight": target_weight, "target_mode": target_mode, "refine": refine,
         "lns_rounds": lns_rounds, "lns_seconds": lns_seconds, "require": require or [],
+        "profile": profile,
     })
     _history.append(snapshot)
     del _history[:-_MAX_HISTORY]

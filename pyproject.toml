@@ -14,7 +14,7 @@ classifiers = [
     "Topic :: Games/Entertainment",
 ]
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.2", "lupa>=2.0", "pillow>=9.2"]
+dependencies = ["mcp>=1.2", "lupa>=2.0", "pillow>=9.2", "highspy>=1.7", "numpy>=1.21"]
 
 [project.scripts]
 pathofbuilding-mcp = "pob_mcp.server:main"

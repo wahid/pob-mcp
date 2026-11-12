@@ -5223,6 +5223,287 @@ function API.keystones()
 end
 
 -------------------------------------------------------------------------------
+-- Exact tree optimiser support (optimizer.py): the tree as a graph with every node's
+-- measured stat change, and a way to set a whole allocation at once
+-------------------------------------------------------------------------------
+
+-- Allocated nodes on the current route from the class start to every socket holding a jewel
+-- that grows with distance (Split Personality): a shorter route would weaken the jewel
+local function distanceRouteNodes()
+	local build = B()
+	local spec, itemsTab = build.spec, build.itemsTab
+	local startId = spec.curClass.startNodeId
+	local keep = {}
+	for id, node in pairs(spec.allocNodes) do
+		if node.type == "Socket" and id < 65536 then
+			local slot = itemsTab.slots["Jewel " .. id]
+			local item = slot and itemsTab.items[slot.selItemId]
+			if item and item.jewelData and item.jewelData.jewelIncEffectFromClassStart then
+				local prev, queue, o, found = { [id] = false }, { node }, 1, nil
+				while o <= #queue and not found do
+					local cur = queue[o]; o = o + 1
+					for _, other in ipairs(cur.linked) do
+						if other.id == startId then found = cur break end
+						if other.alloc and cur.type ~= "Mastery" and other.type ~= "ClassStart" and other.type ~= "AscendClassStart" and prev[other.id] == nil then
+							prev[other.id] = cur.id; queue[#queue + 1] = other
+						end
+					end
+				end
+				local c = found and found.id
+				while c do keep[c] = true c = prev[c] or nil end
+			end
+		end
+	end
+	return keep
+end
+
+-- p.stats: stat names to measure. p.keep / p.require / p.avoid: node refs.
+-- p.include_keystones: unallocated keystones become candidates.
+-- p.radius: only nodes within this many links of the allocated tree (default: whole tree).
+-- Returns the stats now, the point budget and one row per tree node:
+--   {id, type, alloc, fixed, leap, links, d = deltas aligned with stats, m = mastery effects}
+-- d is the change from adding the node to the current tree (unallocated) or what removing it
+-- costs (allocated). Masteries carry one row per effect: {e, d, sel}.
+function API.tree_model(p)
+	local build = B()
+	local spec = build.spec
+	local calcFunc, base = build.calcsTab:GetMiscCalculator()
+	local granted = build.calcsTab.mainEnv.grantedPassives or {}
+	-- "@dps" is the build's main damage stat; with p.lenient, stats that are missing or not
+	-- finite (a Chaos Inoculation build's chaos max hit) are left out instead of failing
+	local stats, baseVals, dropped = {}, {}, {}
+	for _, s in ipairs(p.stats or {}) do
+		if s == "@dps" then s = defaultMetric() end
+		local v = readStat(base, s)
+		if v == nil then
+			if not p.lenient then error(("Unknown or non-numeric stat '%s'"):format(s), 0) end
+			dropped[#dropped + 1] = s
+		else
+			stats[#stats + 1] = s
+			baseVals[#stats] = v
+		end
+	end
+	local useFull = false
+	for _, s in ipairs(stats) do if s == "FullDPS" then useFull = true end end
+	local function delta(out, sign)
+		local d, any = {}, false
+		for i, s in ipairs(stats) do
+			local v = (readStat(out, s) or 0) - baseVals[i]
+			if sign < 0 then v = -v end
+			if math.abs(v) < 1e-9 then v = 0 else any = true end
+			d[i] = v
+		end
+		return any and d or nil
+	end
+	local refSet = function(list)
+		local set = {}
+		for _, ref in ipairs(list or {}) do
+			local r = type(ref) == "table" and ref.node or ref
+			local n = resolveNode(r)
+			if not n then error("Unknown node: " .. tostring(r), 0) end
+			set[n.id] = type(ref) == "table" and ref.effect or true
+		end
+		return set
+	end
+	local keep, req, avoid = refSet(p.keep), refSet(p.require), refSet(p.avoid)
+	local route = distanceRouteNodes()
+	local startId = spec.curClass.startNodeId
+
+	-- which nodes the model covers
+	local function inModel(node)
+		if node.ascendancyName or node.isProxy or node.expansionSkill then return false end
+		if node.id >= 65536 then return false end
+		-- sockets inside a cluster jewel reuse tree socket ids but hang off the cluster
+		if node.expansionJewel and node.expansionJewel.parent then return false end
+		if node.type == "AscendClassStart" then return false end
+		-- an allocated start of another class is a root too (Ascendant's "Path of the ...")
+		if node.type == "ClassStart" then return node.id == startId or node.alloc == true end
+		if granted[node.id] and not node.alloc then return false end
+		if node.type == "Keystone" and not node.alloc and not p.include_keystones and not req[node.id] then return false end
+		if node.type == "Mastery" and node.overrideType ~= "AlternateMastery" and not (node.masteryEffects and #node.masteryEffects > 0) then return false end
+		if not node.linked or #node.linked == 0 then return false end
+		return true
+	end
+	local within
+	if p.radius then
+		within = {}
+		local frontier = {}
+		for id, n in pairs(spec.allocNodes) do within[id] = true frontier[#frontier + 1] = n end
+		for _ = 1, p.radius do
+			local nxt = {}
+			for _, n in ipairs(frontier) do
+				for _, o in ipairs(n.linked) do
+					if not within[o.id] then within[o.id] = true nxt[#nxt + 1] = o end
+				end
+			end
+			frontier = nxt
+		end
+	end
+	local model = {}
+	for id, node in pairs(spec.nodes) do
+		if inModel(node) and (not within or within[id] or req[id]) then model[id] = node end
+	end
+
+	local rows, excludedPoints, cache, calcs = {}, 0, {}, 0
+	for id, node in pairs(spec.allocNodes) do
+		if not model[id] and not node.ascendancyName and node.type ~= "ClassStart" and node.type ~= "AscendClassStart" then
+			excludedPoints = excludedPoints + 1
+		end
+	end
+	local function calc(override)
+		calcs = calcs + 1
+		return calcWithRemoval(calcFunc, override, useFull)
+	end
+	for id, node in pairs(model) do
+		local links = {}
+		for _, o in ipairs(node.linked) do if model[o.id] then links[#links + 1] = o.id end end
+		local fixed = node.type == "ClassStart"
+			or (node.alloc and (node.type == "Keystone" or node.type == "Socket" or route[id] or keep[id]))
+		local row = {
+			id = id, type = node.type, name = node.dn, alloc = node.alloc or false,
+			fixed = fixed or false, require = req[id] and true or nil,
+			avoid = avoid[id] and true or nil, links = links,
+			leap = (node.intuitiveLeapLikesAffecting and #node.intuitiveLeapLikesAffecting > 0) or nil,
+		}
+		-- a main-tree node next to an allocated ascendancy node (Ascendant's "Path of the ...")
+		-- is a starting point: PoB paths through the ascendancy to the class start
+		if node.type ~= "ClassStart" then
+			for _, o in ipairs(node.linked) do
+				if o.alloc and o.ascendancyName then row.entry = true break end
+			end
+		end
+		if node.type == "ClassStart" or node.type == "Socket" then
+			-- no stats of their own
+		elseif node.type == "Mastery" and node.overrideType ~= "AlternateMastery" then
+			row.m = {}
+			local sel = spec.masterySelections[id]
+			local dCur
+			if node.alloc then dCur = delta(calc({ removeNodes = { [node] = true } }), -1) end
+			for _, eff in ipairs(node.masteryEffects) do
+				local e = eff.effect
+				local d
+				if node.alloc and e == sel then
+					d = dCur
+				else
+					local saved, savedAll = node.sd, node.allMasteryOptions
+					node.sd = spec.tree.masteryEffects[e].sd
+					node.allMasteryOptions = false
+					spec.tree:ProcessStats(node)
+					local ok, out = pcall(calc, node.alloc and {} or { addNodes = { [node] = true } })
+					node.sd, node.allMasteryOptions = saved, savedAll
+					spec.tree:ProcessStats(node)
+					if not ok then error(out, 0) end
+					d = delta(out, 1)
+					if node.alloc then
+						-- switching from the current effect: measured relative to the node with no effect
+						local r, any = {}, false
+						for i = 1, #stats do
+							r[i] = (d and d[i] or 0) + (dCur and dCur[i] or 0)
+							any = any or r[i] ~= 0
+						end
+						d = any and r or nil
+					end
+				end
+				local data = spec.tree.masteryEffects[e]
+				row.m[#row.m + 1] = { e = e, d = d, sel = (node.alloc and e == sel) or nil,
+					text = data and table.concat(data.sd or {}, " / ") or nil,
+					want = (req[id] ~= nil and req[id] ~= true and tonumber(req[id]) == e) or nil }
+			end
+		elseif node.alloc then
+			row.d = delta(calc({ removeNodes = { [node] = true } }), -1)
+		else
+			local key = node.modKey
+			if key and key ~= "" and cache[key] ~= nil then
+				row.d = cache[key] or nil
+			else
+				local d = delta(calc({ addNodes = { [node] = true } }), 1)
+				if key and key ~= "" then cache[key] = d or false end
+				row.d = d
+			end
+		end
+		rows[#rows + 1] = row
+	end
+	local used = spec:CountAllocNodes()
+	local base2 = {}
+	for i, s in ipairs(stats) do base2[s] = baseVals[i] end
+	return {
+		stats = stats, dropped = #dropped > 0 and dropped or nil, base = base2, nodes = rows, root = startId,
+		used = used, budget = pointBudget(), excludedPoints = excludedPoints, calcs = calcs,
+		required = { Str = num(base.ReqStr), Dex = num(base.ReqDex), Int = num(base.ReqInt) },
+		reserved = { Mana = num(base.ManaReserved), Life = num(base.LifeReserved) },
+	}
+end
+
+-- Set the whole tree at once: p.nodes = node ids (the model's nodes to allocate),
+-- p.masteries = { [id] = effect }. Nodes the model doesn't cover (ascendancy, cluster jewel
+-- subgraphs) stay as they are.
+function API.set_tree(p)
+	local build = B()
+	local spec = build.spec
+	local state = spec:CreateUndoState()
+	local keepList, keepMast = {}, {}
+	local inList = {}
+	for _, id in ipairs(p.nodes or {}) do inList[tonumber(id)] = true end
+	local startId = spec.curClass.startNodeId
+	for _, id in ipairs(state.hashList) do
+		local node = spec.nodes[id]
+		if not node or node.ascendancyName or id >= 65536 or node.type == "AscendClassStart" or node.type == "ClassStart"
+			or (node.expansionJewel and node.expansionJewel.parent) then
+			keepList[#keepList + 1] = id
+			if spec.masterySelections[id] then keepMast[id] = spec.masterySelections[id] end
+		end
+	end
+	for id in pairs(inList) do keepList[#keepList + 1] = id end
+	for id, e in pairs(p.masteries or {}) do
+		id = tonumber(id)
+		if inList[id] then keepMast[id] = tonumber(e) end
+	end
+	-- runegrafts sit on mastery nodes and are only allocated with some mastery selection
+	local usedEffects = {}
+	for _, e in pairs(keepMast) do usedEffects[e] = true end
+	for id in pairs(inList) do
+		local node = spec.nodes[id]
+		if node and node.type == "Mastery" and node.overrideType == "AlternateMastery" and not keepMast[id] then
+			local cur = spec.masterySelections[id]
+			if cur and not usedEffects[cur] then keepMast[id] = cur
+			else
+				for _, eff in ipairs(node.masteryEffects or {}) do
+					if not usedEffects[eff.effect] then keepMast[id] = eff.effect break end
+				end
+			end
+			if keepMast[id] then usedEffects[keepMast[id]] = true end
+		end
+	end
+	state.hashList = keepList
+	state.masteryEffects = keepMast
+	-- PoB's CreateUndoState reads a field that doesn't exist for the secondary ascendancy
+	state.secondaryAscendClassId = state.secondaryAscendClassId or spec.curSecondaryAscendClassId
+	local mainAtStart = build.skillsTab.socketGroupList[build.mainSocketGroup]
+	spec:RestoreUndoState(state)
+	spec:BuildClusterJewelGraphs()
+	for _, node in pairs(spec.allocNodes) do keepRunegraft(node) end
+	build.itemsTab:PopulateSlots()
+	build.buildFlag = true
+	rebuild()
+	keepMainGroup(mainAtStart)
+	if not p.no_undo then spec:AddUndoState() end
+	local missing = {}
+	for id in pairs(inList) do if not spec.allocNodes[id] then missing[#missing + 1] = id end end
+	local disconnected = {}
+	for id, node in pairs(spec.allocNodes) do
+		if node.type ~= "ClassStart" and node.type ~= "AscendClassStart" and not node.connectedToStart
+			and not (node.intuitiveLeapLikesAffecting and #node.intuitiveLeapLikesAffecting > 0) then
+			disconnected[#disconnected + 1] = id
+		end
+	end
+	local out = output()
+	local vals = {}
+	for _, s in ipairs(p.stats or {}) do vals[s] = num(readStat(out, s)) end
+	return { used = spec:CountAllocNodes(), stats = vals, missing = missing,
+		disconnected = #disconnected > 0 and disconnected or nil }
+end
+
+-------------------------------------------------------------------------------
 -- Dispatcher used by Python
 -------------------------------------------------------------------------------
 function pob_call(method, paramsJson)

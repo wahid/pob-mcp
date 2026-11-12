@@ -670,6 +670,78 @@ def auto_allocate_passives(
     return res
 
 
+@mcp.tool()
+def optimize_tree(
+    mode: Literal["dps", "balanced", "defence"] = "balanced",
+    points: int | None = None,
+    targets: dict[str, float] | None = None,
+    metric: str | None = None,
+    keep: list[str | int] | None = None,
+    require: list[str | int | dict[str, Any]] | None = None,
+    avoid: list[str | int] | None = None,
+    include_keystones: bool = False,
+    weights: dict[str, float] | None = None,
+    max_seconds: int = 900,
+    mip_seconds: int = 10,
+    swap_radius: int = 8,
+    fill_step: int = 10,
+) -> dict:
+    """Re-optimise the whole passive tree with an exact solver (integer programming) instead of
+    the greedy one. Unlike auto_allocate_passives it sees long paths, swaps whole regions, and
+    can rebuild an existing tree, not just add to it.
+
+    `mode` picks the balance:
+    - "dps": damage first (weights dps 1, EHP 0.1, weakest max hit 0.1)
+    - "balanced": dps 0.5, EHP 0.25, weakest max hit 0.25
+    - "defence": dps 0.1, EHP 0.5, weakest max hit 0.5
+    The score is a weighted sum of log(stat), so each weight is the value of a relative gain:
+    in balanced mode +10% DPS is worth the same as +10% EHP and +10% weakest max hit together.
+    `weights` overrides parts, e.g. {"dps": 1, "ehp": 0, "hit": 0} with `targets` for
+    "max DPS subject to these minimums". `metric` is the damage stat (default: the build's
+    main DPS stat).
+
+    How it works: PoB measures every node and mastery effect on the current tree; HiGHS picks
+    the best connected tree within the points (paths exact, each mastery effect once,
+    attribute requirements and unreserved mana/life kept, `targets` as minimums); PoB applies
+    and recalculates it; better trees are measured again and re-solved, worse ones retried with
+    fewer changes. Ascendancy, keystones, jewel sockets, cluster jewels and the route to
+    distance-scaling jewels stay (`keep` adds more; `require` forces nodes or
+    {"node", "effect"} masteries in; `avoid` keeps nodes out). `points` adds that many points
+    to the current count (default: fill to the level's budget).
+
+    Each step changes at most `swap_radius` allocated nodes and adds at most `fill_step`
+    points beyond that; only nodes within that reach of the tree are measured, which keeps
+    each integer program small enough to solve well in `mip_seconds`.
+    A run takes a few minutes (each re-measure is a few thousand PoB calculations). The result
+    has start/final stats, ratios, what was added and removed, and the per-iteration history.
+    undo_last_change reverts it.
+    """
+    from .optimizer import TreeOptimizer
+
+    e = _engine()
+    e.require_build()
+    snapshot = e.call("export_xml")["xml"]
+
+    # Server-side safety caps for untrusted tool callers.
+    # Keep defaults unchanged while preventing runaway requests.
+    max_seconds = max(1, min(max_seconds, 900))
+    mip_seconds = max(1, min(mip_seconds, 120, max_seconds))
+    swap_radius = max(1, min(swap_radius, 12))
+    fill_step = max(1, min(fill_step, 20))
+    if points is not None:
+        points = max(0, min(int(points), 150))  # a full tree is 123 points plus quest/jewel extras
+
+    opt = TreeOptimizer(e, mode=mode, metric=metric, targets=targets, points=points, keep=keep,
+                        require=require, avoid=avoid, include_keystones=include_keystones,
+                        weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,
+                        swap_radius=swap_radius, fill_step=fill_step)
+    res = opt.run()
+    _history.append(snapshot)
+    del _history[:-_MAX_HISTORY]
+    res["undo_available"] = len(_history)
+    return res
+
+
 # ---------------------------------------------------------------------------
 # Tools: items and gaps
 # ---------------------------------------------------------------------------

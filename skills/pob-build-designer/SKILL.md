@@ -126,9 +126,12 @@ Equip what a player at the target budget would really own (gear-and-progression.
 2. `get_tree_map` once to see the tree's structure, then `find_routes` /
    `allocate_path` toward the clusters that serve the concept. Route through nodes
    that are useful on the way.
-3. `auto_allocate_passives(weights=...)` to fill remaining points toward a weighted
-   goal (for example main DPS plus TotalEHP plus Life), with `avoid` for anything
-   you rejected. The optimiser is greedy and follows the weights literally, so give it
+3. `optimize_tree(mode=...)` to spend and rebalance the points: "dps", "balanced" or
+   "defence", with `avoid` for anything you rejected and `require` for build-defining
+   picks. It solves the whole tree at once (paths and region swaps included) and takes a
+   few minutes. For "as much damage as possible while meeting these minimums" use
+   `weights={"dps": 1, "ehp": 0, "hit": 0}` with `targets`. `auto_allocate_passives` is
+   the faster greedy alternative for adding a few points. Either way, give it
    the defense benchmarks as `targets` (for example `{"PhysicalMaximumHitTaken": 10000,
    "LightningMaximumHitTaken": 30000}` for T16 mapping): it closes those gaps first,
    then spends the rest on the weights without breaking them. If it reports a target

@@ -94,7 +94,7 @@ def run_one(e: PobEngine, path: str, max_seconds: int, hit_target: float, max_pa
     reset_xml = e.call("export_xml")["xml"]
     best = None
     plans = (("targets-first", None, False), ("blend", 1.0, False), ("targets-first+small", None, True),
-             ("slack", "slack", True), ("repair", "repair", True))
+             ("slack", "slack", True), ("repair", "repair", True), ("ilp", "ilp", True))
     if strategies != "all":
         plans = tuple(x for x in plans if x[0] in strategies.split(","))
     for strategy, tw, small in plans:
@@ -111,7 +111,19 @@ def run_one(e: PobEngine, path: str, max_seconds: int, hit_target: float, max_pa
             args["lns_seconds"] = lns_seconds or max_seconds * 4
             args["lns_max_drop"] = 8
             args["lns_temperature"] = 2
-        res = e.call("auto_allocate", args)
+        if tw == "ilp":
+            # exact optimiser (optimize_tree): max DPS with the same targets as constraints
+            from pob_mcp.optimizer import TreeOptimizer
+            out = TreeOptimizer(e, mode="dps", metric=metric, targets=targets, points=budget,
+                                weights={"dps": 1, "ehp": 0, "hit": 0}, max_seconds=max_seconds * 3).run()
+            bad = {v["stat"] for v in out["violations"]}
+            res = {"targets": {k: {"target": t, "value": out["final"].get(k), "met": k not in bad}
+                               for k, t in targets.items()},
+                   "validity": {v["stat"]: {"met": False} for v in out["violations"] if v["kind"] == "validity"},
+                   "stoppedBecause": f"{out['iterations']} iterations, {out['seconds']}s",
+                   "allocated": [{"name": n, "type": "added"} for n in out["added"]]}
+        else:
+            res = e.call("auto_allocate", args)
         # measure what survives a save/reload, so session-only effects can't count
         xml_now = e.call("export_xml")["xml"]
         e.load_build(xml_now, Path(path).stem)
@@ -182,7 +194,7 @@ def main():
     ap.add_argument("--max-path-cost", type=int, default=10)
     ap.add_argument("--lns-rounds", type=int, default=0, help="large-neighbourhood search rounds after the greedy fill")
     ap.add_argument("--lns-seconds", type=int, default=None, help="time for the LNS (default 4x --max-seconds)")
-    ap.add_argument("--strategies", default="all", help="comma list: targets-first, blend, targets-first+small, slack, repair")
+    ap.add_argument("--strategies", default="all", help="comma list: targets-first, blend, targets-first+small, slack, repair, ilp")
     ap.add_argument("--save-dir", default=None, help="save each rebuilt build here as XML")
     ap.add_argument("--hit-share", type=float, default=0.95)
     ap.add_argument("--jobs", type=int, default=1,

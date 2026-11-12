@@ -468,3 +468,33 @@ def test_auto_allocate_profile(deadeye):
     assert prof["calcs"] > 0 and 0 < prof["calcShare"] <= 1
     # the calculator is restored afterwards
     assert "profile" not in deadeye.call("auto_allocate", {"points": 1, "weights": {"CombinedDPS": 1}})
+
+
+def test_tree_model_roundtrip(deadeye):
+    stats = ["@dps", "TotalEHP", "ChaosMaximumHitTaken", "NotAStat"]
+    m = deadeye.call("tree_model", {"stats": stats, "lenient": True, "radius": 3})
+    assert m["stats"][0] in ("CombinedDPS", "FullDPS") and "NotAStat" in m["dropped"]
+    alloc = [r["id"] for r in m["nodes"] if r["alloc"] and r["type"] != "ClassStart"]
+    mast = {str(r["id"]): e["e"] for r in m["nodes"] for e in (r.get("m") or []) if e.get("sel")}
+    assert any(r.get("d") for r in m["nodes"] if not r["alloc"])
+    out = deadeye.call("set_tree", {"nodes": alloc, "masteries": mast, "stats": m["stats"], "no_undo": True})
+    assert not out["missing"] and not out.get("disconnected")
+    assert out["used"] == m["used"]
+    for s in m["stats"]:
+        assert out["stats"][s] == pytest.approx(m["base"][s], rel=1e-6)
+
+
+@pytest.mark.parametrize("mode", ["dps", "defence"])
+def test_optimize_tree(deadeye, mode):
+    from pob_mcp.optimizer import TreeOptimizer
+    before = deadeye.call("stats", {"keys": ["CombinedDPS", "TotalEHP"]})
+    used = deadeye.call("summary")["passivePointsUsed"]
+    res = TreeOptimizer(deadeye, mode=mode, points=8, max_iters=3, mip_seconds=10,
+                        swap_radius=4, fill_step=8).run()
+    assert res["points"]["used"] == used + 8
+    assert res["utility"]["final"] >= res["utility"]["start"]
+    for v in res["violations"]:  # the test build starts short on Dex: never worse than before
+        assert v["value"] >= res["start"][v["stat"]]
+    after = deadeye.call("stats", {"keys": ["CombinedDPS", "TotalEHP"]})
+    key = "CombinedDPS" if mode == "dps" else "TotalEHP"
+    assert after[key] >= before[key] * 0.999

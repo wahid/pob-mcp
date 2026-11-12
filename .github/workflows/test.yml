@@ -6,6 +6,9 @@ on:
   schedule:
     - cron: "0 6 * * 1"   # weekly, to catch Path of Building updates
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

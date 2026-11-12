@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0
+## 0.5.1
 
 New tools
 - `optimize_tree`: exact optimiser for the whole passive tree. PoB measures every node and

@@ -81,6 +81,9 @@ class TreeOptimizer:
     min_gain: float = 0.003
     weights: dict[str, float] | None = None
     log: object = None
+    pool: object = None       # MeasurePool: measure on several PoB processes
+    progress: object = None   # callable(elapsed_seconds, max_seconds, message)
+    cancel: object = None     # threading.Event: stop after the current step, keep the best tree
     history: list = field(default_factory=list)
 
     # -- PoB side ---------------------------------------------------------------------
@@ -98,7 +101,10 @@ class TreeOptimizer:
         for k in ("keep", "require", "avoid"):
             if getattr(self, k):
                 params[k] = getattr(self, k)
-        return self.engine.call("tree_model", params)
+        t = time.time()
+        model = self.pool.tree_model(params) if self.pool else self.engine.call("tree_model", params)
+        self.measure_seconds = getattr(self, "measure_seconds", 0.0) + time.time() - t
+        return model
 
     def _reach(self):
         # nodes further than this from the current tree can't be reached in one step
@@ -586,11 +592,30 @@ class TreeOptimizer:
     def _say(self, msg):
         if self.log:
             self.log(msg)
+        if self.progress:
+            try:
+                self.progress(time.time() - self._t_start, self.max_seconds, msg)
+            except Exception:  # noqa: BLE001 - progress is best-effort
+                pass
+
+    def _status(self, it, stats, start, used):
+        def pct(k):
+            a, b = start.get(k), stats.get(k)
+            return f"{(b / a - 1) * 100:+.1f}%" if a and b is not None else "n/a"
+        hits = [h for h in self.hit_stats if start.get(h) and stats.get(h) is not None]
+        worst = min(hits, key=lambda h: stats[h]) if hits else None
+        parts = [f"step {it}: DPS {pct(self.dps_stat)}", f"EHP {pct('TotalEHP')}"]
+        if worst:
+            parts.append(f"weakest max hit {stats[worst] / min(start[h] for h in hits) * 100 - 100:+.1f}%")
+        parts.append(f"{used}/{self.total_points} points")
+        return ", ".join(parts)
 
     def run(self) -> dict:
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of dps, balanced, defence (got {self.mode!r})")
-        t_start = time.time()
+        t_start = self._t_start = time.time()
+        self.measure_seconds = self.solve_seconds = 0.0
+        self._say("measuring the tree")
         # required picks are allocated up front (with their paths) and then kept fixed
         if self.require:
             edits = []
@@ -640,11 +665,16 @@ class TreeOptimizer:
         notes = []
         tried, rejected_on_model = set(), False
         while it < self.max_iters and time.time() - t_start < self.max_seconds:
+            if self.cancel is not None and self.cancel.is_set():
+                notes.append("cancelled: kept the best tree found so far")
+                break
             it += 1
             model_free = self.total_points - model["excludedPoints"] - sum(
                 1 for r in model["nodes"] if r["alloc"] and r["type"] != "ClassStart")
             adds = min(radius + min(max(model_free, 0), self.fill_step), self._reach())
+            t = time.time()
             res, info = self._solve(model, radius, adds)
+            self.solve_seconds += time.time() - t
             if res is None:
                 notes.append(f"iteration {it}: solver gave no tree ({info.get('status')})")
                 break
@@ -677,7 +707,7 @@ class TreeOptimizer:
                     best = cur
                 entry["result"] = "accepted"
                 self.history.append(entry)
-                self._say(f"iteration {it}: accepted, utility {u:.4f}, {self.dps_stat} {entry['dps']}")
+                self._say(self._status(it, out["stats"], start_stats, len(nodes) + model["excludedPoints"]))
                 # diminishing returns: every point is spent and the step barely helped
                 if gain < self.min_gain and len(nodes) + model["excludedPoints"] >= self.total_points:
                     notes.append(f"stopped after iteration {it}: gain {gain:.4f} below {self.min_gain}")
@@ -690,6 +720,7 @@ class TreeOptimizer:
                 entry["result"] = "rejected"
                 rejected_on_model = True
                 self.history.append(entry)
+                self._say(f"step {it}: no better, trying a smaller change")
                 self._apply(cur.nodes, cur.masteries)
                 radius //= 2
                 if radius < 1:
@@ -716,6 +747,8 @@ class TreeOptimizer:
             "iterations": it,
             "measurements": measured,
             "seconds": round(time.time() - t_start, 1),
+            "timing": {"measure": round(self.measure_seconds, 1), "solve": round(self.solve_seconds, 1),
+                       "jobs": getattr(self.pool, "jobs", 1) if self.pool else 1},
             "history": self.history,
             "notes": notes,
         }

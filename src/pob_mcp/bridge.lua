@@ -5345,6 +5345,22 @@ function API.tree_model(p)
 	end
 
 	local rows, excludedPoints, cache, calcs = {}, 0, {}, 0
+	-- p.shard = { i, n }: measure only this process's share of the nodes (0-based i of n).
+	-- Work is dealt out in id order to the least-loaded shard, so every process with the same
+	-- build agrees on who measures what; the others' rows come back with skip = true.
+	local shardI, shardN = p.shard and p.shard[1], p.shard and p.shard[2]
+	local load = {}
+	for i = 1, (shardN or 1) do load[i] = 0 end
+	local function mine(cost)
+		if not shardN then return true end
+		local best = 1
+		for i = 2, shardN do if load[i] < load[best] then best = i end end
+		load[best] = load[best] + cost
+		return best == shardI + 1
+	end
+	local modelIds = {}
+	for id in pairs(model) do modelIds[#modelIds + 1] = id end
+	table.sort(modelIds)
 	for id, node in pairs(spec.allocNodes) do
 		if not model[id] and not node.ascendancyName and node.type ~= "ClassStart" and node.type ~= "AscendClassStart" then
 			excludedPoints = excludedPoints + 1
@@ -5354,7 +5370,8 @@ function API.tree_model(p)
 		calcs = calcs + 1
 		return calcWithRemoval(calcFunc, override, useFull)
 	end
-	for id, node in pairs(model) do
+	for _, id in ipairs(modelIds) do
+		local node = model[id]
 		local links = {}
 		for _, o in ipairs(node.linked) do if model[o.id] then links[#links + 1] = o.id end end
 		local fixed = node.type == "ClassStart"
@@ -5374,6 +5391,8 @@ function API.tree_model(p)
 		end
 		if node.type == "ClassStart" or node.type == "Socket" then
 			-- no stats of their own
+		elseif node.type == "Mastery" and node.overrideType ~= "AlternateMastery" and not mine(#node.masteryEffects + 1) then
+			row.skip = true
 		elseif node.type == "Mastery" and node.overrideType ~= "AlternateMastery" then
 			row.m = {}
 			local sel = spec.masterySelections[id]
@@ -5410,15 +5429,26 @@ function API.tree_model(p)
 					want = (req[id] ~= nil and req[id] ~= true and tonumber(req[id]) == e) or nil }
 			end
 		elseif node.alloc then
-			row.d = delta(calc({ removeNodes = { [node] = true } }), -1)
-		else
-			local key = node.modKey
-			if key and key ~= "" and cache[key] ~= nil then
-				row.d = cache[key] or nil
+			if mine(1) then
+				row.d = delta(calc({ removeNodes = { [node] = true } }), -1)
 			else
-				local d = delta(calc({ addNodes = { [node] = true } }), 1)
-				if key and key ~= "" then cache[key] = d or false end
-				row.d = d
+				row.skip = true
+			end
+		else
+			-- nodes with the same mods are measured once; the rest point at the first
+			local key = node.modKey
+			local owner = key and key ~= "" and cache[key]
+			if owner then
+				if shardN then row.same = owner.id else row.d = owner.d end
+			else
+				local rec = { id = id }
+				if key and key ~= "" then cache[key] = rec end
+				if mine(1) then
+					rec.d = delta(calc({ addNodes = { [node] = true } }), 1)
+					row.d = rec.d
+				else
+					row.skip = true
+				end
 			end
 		end
 		rows[#rows + 1] = row

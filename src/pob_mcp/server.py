@@ -16,9 +16,9 @@ from typing import Any, Literal, Optional
 
 try:  # MCP Python SDK 2.x
     from mcp.server.mcpserver import MCPServer as FastMCP
-    from mcp.server.mcpserver import Image
+    from mcp.server.mcpserver import Context, Image
 except ImportError:  # MCP Python SDK 1.x
-    from mcp.server.fastmcp import FastMCP, Image
+    from mcp.server.fastmcp import Context, FastMCP, Image
 from pydantic import BaseModel, Field
 
 from . import library, online
@@ -60,6 +60,58 @@ engine: PobEngine | None = None
 _history: list[str] = []          # XML snapshots for undo
 _source: dict = {}                # {"path": Path, "mtime": float} when loaded from a saved build
 _MAX_HISTORY = 20
+_pool = None                      # MeasurePool, created on first use
+
+
+def _measure_pool(jobs: int | None):
+    """Helper PoB processes for optimize_tree; `jobs` counts the main engine too."""
+    global _pool
+    from .pool import MeasurePool, default_jobs
+    jobs = max(1, min(int(jobs), 8)) if jobs else default_jobs()
+    if _pool is None:
+        _pool = MeasurePool(_engine(), jobs)
+    else:
+        _pool.jobs = jobs
+    return _pool
+
+
+async def _run_with_progress(ctx, work):
+    """Run blocking `work(progress, cancel)` in a thread; relay progress to the client and stop
+    the work (keeping its best result so far) when the client cancels the request."""
+    import threading
+
+    import anyio
+
+    cancel = threading.Event()
+    done = anyio.Event()
+    box: dict = {}
+
+    def progress(elapsed, total, message):
+        if ctx is None:
+            return
+        try:
+            anyio.from_thread.run(ctx.report_progress, round(elapsed, 1), float(total), message)
+        except Exception:  # noqa: BLE001 - a client that went away must not stop the run
+            pass
+
+    def run():
+        try:
+            box["result"] = work(progress, cancel)
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+        finally:
+            anyio.from_thread.run_sync(done.set)
+
+    try:
+        await anyio.to_thread.run_sync(run, abandon_on_cancel=True)
+    except anyio.get_cancelled_exc_class():
+        cancel.set()
+        with anyio.CancelScope(shield=True):  # let the step in flight finish and tidy up
+            await done.wait()
+        raise
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def _engine() -> PobEngine:
@@ -671,7 +723,7 @@ def auto_allocate_passives(
 
 
 @mcp.tool()
-def optimize_tree(
+async def optimize_tree(
     mode: Literal["dps", "balanced", "defence"] = "balanced",
     points: int | None = None,
     targets: dict[str, float] | None = None,
@@ -686,6 +738,8 @@ def optimize_tree(
     swap_radius: int = 8,
     fill_step: int = 10,
     apply: bool = True,
+    jobs: int | None = None,
+    ctx: Context | None = None,
 ) -> dict:
     """Re-optimise the whole passive tree with an exact solver (integer programming) instead of
     the greedy one. Unlike auto_allocate_passives it sees long paths, swaps whole regions, and
@@ -733,24 +787,30 @@ def optimize_tree(
     if points is not None:
         points = max(0, min(int(points), 150))  # a full tree is 123 points plus quest/jewel extras
 
-    opt = TreeOptimizer(e, mode=mode, metric=metric, targets=targets, points=points, keep=keep,
-                        require=require, avoid=avoid, include_keystones=include_keystones,
-                        weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,
-                        swap_radius=swap_radius, fill_step=fill_step)
-    try:
-        res = opt.run()
-    except Exception:
-        if not apply:
+    pool = _measure_pool(jobs)
+
+    def work(progress, cancel):
+        opt = TreeOptimizer(e, mode=mode, metric=metric, targets=targets, points=points, keep=keep,
+                            require=require, avoid=avoid, include_keystones=include_keystones,
+                            weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,
+                            swap_radius=swap_radius, fill_step=fill_step,
+                            pool=pool, progress=progress, cancel=cancel)
+        try:
+            res = opt.run()
+        except Exception:
+            if not apply:
+                e.call("load_xml", {"xml": snapshot, "name": "Build"})
+            raise
+        res["applied"] = apply
+        if apply:
+            _history.append(snapshot)
+            del _history[:-_MAX_HISTORY]
+        else:
             e.call("load_xml", {"xml": snapshot, "name": "Build"})
-        raise
-    res["applied"] = apply
-    if apply:
-        _history.append(snapshot)
-        del _history[:-_MAX_HISTORY]
-    else:
-        e.call("load_xml", {"xml": snapshot, "name": "Build"})
-    res["undo_available"] = len(_history)
-    return res
+        res["undo_available"] = len(_history)
+        return res
+
+    return await _run_with_progress(ctx, work)
 
 
 # ---------------------------------------------------------------------------

@@ -50,12 +50,20 @@ def test_server_over_stdio(sample_xml):
 
                 # optimize_tree preview: reports the plan, leaves the build untouched
                 before = json.loads((await s.call_tool("get_build_summary", {})).content[0].text)
+                seen = []
+
+                async def on_progress(*args, **kwargs):
+                    seen.append(kwargs.get("message") or (args[2] if len(args) > 2 else None))
+
                 res = await s.call_tool("optimize_tree", {"mode": "dps", "points": 3, "apply": False,
                                                           "max_seconds": 20, "swap_radius": 2,
-                                                          "fill_step": 3})
+                                                          "fill_step": 3, "jobs": 2},
+                                        progress_callback=on_progress)
                 assert not getattr(res, "is_error", getattr(res, "isError", False)), res.content[0].text
                 plan = json.loads(res.content[0].text)
                 assert plan["applied"] is False
+                assert plan["timing"]["jobs"] == 2
+                assert any(m and "step" in m for m in seen), seen  # progress reached the client
                 after = json.loads((await s.call_tool("get_build_summary", {})).content[0].text)
                 assert after["passivePointsUsed"] == before["passivePointsUsed"]
 

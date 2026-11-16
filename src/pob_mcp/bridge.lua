@@ -4989,6 +4989,102 @@ function API.gear_upgrades(p)
 		note = "Each upgrade swaps one mod: the new mod goes in a free affix slot, or replaces the weakest mod of the same type (prefix/suffix). Score is the weighted % gain. Search the trade site for the item with the new mod (trade_search) to price it." }
 end
 
+-- Every unique that fits a gear slot and scores better there than what is equipped.
+-- Uniques are built with PoB's default (mid) rolls and their latest variant.
+function API.unique_upgrades(p)
+	local build = B()
+	local itemsTab = build.itemsTab
+	local weights = p.weights
+	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 0.5 } end
+	local calcFunc, base = build.calcsTab:GetMiscCalculator()
+	local useFull = weights.FullDPS ~= nil
+	local bases = {}
+	for stat in pairs(weights) do
+		bases[stat] = readStat(base, stat)
+		if bases[stat] == nil then error(("Unknown or non-numeric stat '%s'"):format(stat), 0) end
+	end
+	local keyStats = { defaultMetric(), "TotalEHP", "Life", "PhysicalMaximumHitTaken", "LightningMaximumHitTaken" }
+	local wanted
+	if p.slots and #p.slots > 0 then
+		wanted = {}
+		for _, sl in ipairs(p.slots) do wanted[sl] = true end
+	end
+	local minScore = p.min_score or 0.5
+	local maxLoss = p.max_loss or 5
+	local level = build.characterLevel or 100
+	local results, tested = {}, 0
+	for _, slotName in ipairs(GEAR_SLOTS) do
+		local slot = itemsTab.slots[slotName]
+		if slot and (not wanted or wanted[slotName]) then
+			local cur = slot.selItemId and slot.selItemId ~= 0 and itemsTab.items[slot.selItemId]
+			for _, src in pairs(main.uniqueDB.list) do
+				local okFit, fits = pcall(itemsTab.IsItemValidForSlot, itemsTab, src, slotName)
+				local req = src.requirements and src.requirements.level or 0
+				if okFit and fits and req <= level and not (cur and cur.title == src.title) then
+					local okItem, item = pcall(function()
+						local it = new("Item"):Item(src:BuildRaw())
+						it:NormaliseQuality()
+						it:BuildModList()
+						return it
+					end)
+					if okItem then
+						local ok, out = pcall(calcFunc, { repSlotName = slotName, repItem = item }, useFull)
+						tested = tested + 1
+						if ok then
+							local sc = weightedScore(weights, bases, out)
+							if sc >= minScore then
+								local ch, worst = {}, 0
+								for _, k in ipairs(keyStats) do
+									local b, a = readStat(base, k), readStat(out, k)
+									if b and a and b ~= 0 and math.abs(a - b) > 1e-6 then
+										ch[k] = math.floor((a - b) / math.abs(b) * 1000 + 0.5) / 10
+										worst = math.min(worst, ch[k])
+									end
+								end
+								local warn = {}
+								-- an "upgrade" may not cost more than max_loss % of any key stat
+								if worst < -maxLoss then sc = -1 end
+							end
+							if sc >= minScore then
+								local ch = {}
+								for _, k in ipairs(keyStats) do
+									local b, a = readStat(base, k), readStat(out, k)
+									if b and a and b ~= 0 and math.abs(a - b) > 1e-6 then
+										ch[k] = math.floor((a - b) / math.abs(b) * 1000 + 0.5) / 10
+									end
+								end
+								local warn = {}
+								for _, el in ipairs({ "Fire", "Cold", "Lightning" }) do
+									local cap = resistCap(el)
+									local b, a = readStat(base, el .. "Resist") or 0, readStat(out, el .. "Resist") or 0
+									if b >= cap and a < cap then warn[#warn + 1] = ("%s resistance drops to %d%%"):format(el, a) end
+								end
+								local broken = false
+								for _, attr in ipairs({ "Str", "Dex", "Int" }) do
+									local have, need = readStat(out, attr) or 0, readStat(out, "Req" .. attr) or 0
+									local wasShort = (readStat(base, "Req" .. attr) or 0) > (readStat(base, attr) or 0)
+									if need > have then
+										-- PoB keeps calculating gems and gear you no longer have the attributes
+										-- for, so a swap that breaks a requirement is not a real upgrade
+										if not wasShort then broken = true end
+										warn[#warn + 1] = ("needs %d %s (has %d)"):format(need, attr, have)
+									end
+								end
+								if not broken then results[#results + 1] = { slot = slotName, name = src.title, base = src.baseName,
+									replaces = cur and cur.name or nil, score = math.floor(sc * 100 + 0.5) / 100,
+									pct = ch, levelReq = req > 0 and req or nil,
+									warning = #warn > 0 and table.concat(warn, "; ") or nil } end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	table.sort(results, function(a, b) return a.score > b.score end)
+	return { weights = weights, tested = tested, upgrades = results }
+end
+
 -------------------------------------------------------------------------------
 -- Config audit: what each switched-on Configuration condition is worth
 -------------------------------------------------------------------------------
@@ -5309,6 +5405,13 @@ function API.tree_model(p)
 	local route = distanceRouteNodes()
 	local startId = spec.curClass.startNodeId
 
+	-- p.only: the model is limited to these nodes (leveling trees built from a final tree);
+	-- p.mastery_effects = { [id] = effect }: those masteries offer just that effect
+	local only
+	if p.only then
+		only = {}
+		for _, id in ipairs(p.only) do only[tonumber(id)] = true end
+	end
 	-- which nodes the model covers
 	local function inModel(node)
 		if node.ascendancyName or node.isProxy or node.expansionSkill then return false end
@@ -5319,7 +5422,8 @@ function API.tree_model(p)
 		-- an allocated start of another class is a root too (Ascendant's "Path of the ...")
 		if node.type == "ClassStart" then return node.id == startId or node.alloc == true end
 		if granted[node.id] and not node.alloc then return false end
-		if node.type == "Keystone" and not node.alloc and not p.include_keystones and not req[node.id] then return false end
+		if node.type == "Keystone" and not node.alloc and not p.include_keystones and not req[node.id]
+			and not (only and only[node.id]) then return false end
 		if node.type == "Mastery" and node.overrideType ~= "AlternateMastery" and not (node.masteryEffects and #node.masteryEffects > 0) then return false end
 		if not node.linked or #node.linked == 0 then return false end
 		return true
@@ -5339,9 +5443,14 @@ function API.tree_model(p)
 			frontier = nxt
 		end
 	end
+	local fixedEffect = {}
+	for id, e in pairs(p.mastery_effects or {}) do fixedEffect[tonumber(id)] = tonumber(e) end
 	local model = {}
 	for id, node in pairs(spec.nodes) do
-		if inModel(node) and (not within or within[id] or req[id]) then model[id] = node end
+		if inModel(node) and (not within or within[id] or req[id])
+			and (not only or only[id] or node.alloc or node.type == "ClassStart") then
+			model[id] = node
+		end
 	end
 
 	local rows, excludedPoints, cache, calcs = {}, 0, {}, 0
@@ -5389,7 +5498,19 @@ function API.tree_model(p)
 				if o.alloc and o.ascendancyName then row.entry = true break end
 			end
 		end
-		if node.type == "ClassStart" or node.type == "Socket" then
+		if node.type == "Socket" and not node.alloc then
+			-- an empty socket is worth nothing, but one whose jewel is still in its slot (after
+			-- a tree reset, or in a leveling tree) gives that jewel back
+			local slot = build.itemsTab.slots["Jewel " .. id]
+			if slot and slot.selItemId and slot.selItemId ~= 0 and build.itemsTab.items[slot.selItemId] then
+				if mine(1) then
+					row.d = delta(calc({ addNodes = { [node] = true } }), 1)
+					row.jewel = true
+				else
+					row.skip = true
+				end
+			end
+		elseif node.type == "ClassStart" or node.type == "Socket" then
 			-- no stats of their own
 		elseif node.type == "Mastery" and node.overrideType ~= "AlternateMastery" and not mine(#node.masteryEffects + 1) then
 			row.skip = true
@@ -5401,7 +5522,9 @@ function API.tree_model(p)
 			for _, eff in ipairs(node.masteryEffects) do
 				local e = eff.effect
 				local d
-				if node.alloc and e == sel then
+				if fixedEffect[id] and fixedEffect[id] ~= e and not (node.alloc and e == sel) then
+					e = nil
+				elseif node.alloc and e == sel then
 					d = dCur
 				else
 					local saved, savedAll = node.sd, node.allMasteryOptions
@@ -5423,10 +5546,12 @@ function API.tree_model(p)
 						d = any and r or nil
 					end
 				end
-				local data = spec.tree.masteryEffects[e]
-				row.m[#row.m + 1] = { e = e, d = d, sel = (node.alloc and e == sel) or nil,
-					text = data and table.concat(data.sd or {}, " / ") or nil,
-					want = (req[id] ~= nil and req[id] ~= true and tonumber(req[id]) == e) or nil }
+				if e then
+					local data = spec.tree.masteryEffects[e]
+					row.m[#row.m + 1] = { e = e, d = d, sel = (node.alloc and e == sel) or nil,
+						text = data and table.concat(data.sd or {}, " / ") or nil,
+						want = (req[id] ~= nil and req[id] ~= true and tonumber(req[id]) == e) or nil }
+				end
 			end
 		elseif node.alloc then
 			if mine(1) then
@@ -5462,6 +5587,108 @@ function API.tree_model(p)
 		required = { Str = num(base.ReqStr), Dex = num(base.ReqDex), Int = num(base.ReqInt) },
 		reserved = { Mana = num(base.ManaReserved), Life = num(base.LifeReserved) },
 	}
+end
+
+-- What groups of nodes are worth on the current tree. Each group: add = ids to allocate,
+-- remove = ids to take out, masteries = { [id] = effect } (the effect a mastery in `add` would
+-- have, or another effect for an allocated mastery). Returns the stats with each group applied.
+function API.value_groups(p)
+	local build = B()
+	local spec = build.spec
+	local calcFunc, base = build.calcsTab:GetMiscCalculator()
+	local stats = {}
+	for _, s in ipairs(p.stats or {}) do
+		if s == "@dps" then s = defaultMetric() end
+		stats[#stats + 1] = s
+	end
+	local useFull = false
+	for _, s in ipairs(stats) do if s == "FullDPS" then useFull = true end end
+	local function read(out)
+		local r = {}
+		for _, s in ipairs(stats) do r[s] = readStat(out, s) end
+		return r
+	end
+	local results = {}
+	for gi, g in ipairs(p.groups or {}) do
+		local override = {}
+		local add, remove = {}, {}
+		for _, id in ipairs(g.add or {}) do
+			local n = spec.nodes[tonumber(id)]
+			if n and not n.alloc then add[n] = true end
+		end
+		for _, id in ipairs(g.remove or {}) do
+			local n = spec.nodes[tonumber(id)]
+			if n and n.alloc then remove[n] = true end
+		end
+		if next(add) then override.addNodes = add end
+		if next(remove) then override.removeNodes = remove end
+		local swapped = {}
+		for id, e in pairs(g.masteries or {}) do
+			local n = spec.nodes[tonumber(id)]
+			local data = spec.tree.masteryEffects[tonumber(e)]
+			if n and data and not remove[n] then
+				swapped[#swapped + 1] = { n, n.sd, n.allMasteryOptions }
+				n.sd = data.sd
+				n.allMasteryOptions = false
+				spec.tree:ProcessStats(n)
+			end
+		end
+		local ok, out = pcall(calcWithRemoval, calcFunc, override, useFull)
+		for _, sw in ipairs(swapped) do
+			sw[1].sd, sw[1].allMasteryOptions = sw[2], sw[3]
+			spec.tree:ProcessStats(sw[1])
+		end
+		if not ok then error(out, 0) end
+		results[gi] = read(out)
+	end
+	return { base = read(base), groups = results }
+end
+
+-- Leveling stages for the exact planner: a new tree spec at `level` holding the nodes of the
+-- previous stage, with that level's ascendancy points spent on the final tree's ascendancy
+-- nodes. leveling_finish puts the final tree and level back.
+function API.leveling_stage(p)
+	local build = B()
+	local treeTab = build.treeTab
+	local final = treeTab.specList[p.final_spec]
+	if not final then error("Unknown final spec", 0) end
+	local level = p.level
+	local idx, spec = addSpec(p.title or ("Level %d"):format(level), nil)
+	-- jewels belong to a spec: carry the final tree's over, so a socket is worth its jewel
+	for nodeId, itemId in pairs(final.jewels or {}) do
+		if nodeId < 65536 then spec.jewels[nodeId] = itemId end
+	end
+	treeTab:SetActiveSpec(idx)
+	build.characterLevel = level
+	build.characterLevelAutoMode = false
+	rebuild()
+	if p.nodes and #p.nodes > 0 then
+		API.set_tree({ nodes = p.nodes, masteries = p.masteries or {}, no_undo = true })
+	end
+	local ascAllowed = {}
+	for id, n in pairs(final.allocNodes) do
+		if n.ascendancyName and n.type ~= "AscendClassStart" then ascAllowed[id] = spec.nodes[id] end
+	end
+	local weights = p.weights
+	if not weights or next(weights) == nil then weights = { [defaultMetric()] = 1, TotalEHP = 1 } end
+	local _, ascSpent = growWithin(spec, ascAllowed, 0, weights, ascPointsAtLevel(level))
+	local finalUsed = final:CountAllocNodes()
+	return { spec = idx, level = level, budget = math.min(pointsAtLevel(level), finalUsed),
+		used = spec:CountAllocNodes(), ascendancyPoints = ascSpent }
+end
+
+function API.leveling_finish(p)
+	local build = B()
+	build.treeTab:SetActiveSpec(p.final_spec)
+	build.characterLevel, build.characterLevelAutoMode = p.level, p.auto
+	rebuild()
+	return { spec = p.final_spec }
+end
+
+function API.leveling_info()
+	local build = B()
+	return { spec = build.treeTab.activeSpec, level = build.characterLevel,
+		auto = build.characterLevelAutoMode or false, used = build.spec:CountAllocNodes() }
 end
 
 -- Set the whole tree at once: p.nodes = node ids (the model's nodes to allocate),

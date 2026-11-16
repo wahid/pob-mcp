@@ -498,3 +498,73 @@ def test_optimize_tree(deadeye, mode):
     after = deadeye.call("stats", {"keys": ["CombinedDPS", "TotalEHP"]})
     key = "CombinedDPS" if mode == "dps" else "TotalEHP"
     assert after[key] >= before[key] * 0.999
+
+
+def test_tree_model_shards_match_single(deadeye):
+    """Splitting the measuring over shards gives the same rows as one process."""
+    from pob_mcp.pool import _merge
+    params = {"stats": ["@dps", "TotalEHP"], "lenient": True, "radius": 3}
+    whole = deadeye.call("tree_model", params)
+    parts = [deadeye.call("tree_model", {**params, "shard": [i, 3]}) for i in range(3)]
+    merged = _merge(parts)
+    assert merged["calcs"] == whole["calcs"]
+    a = {r["id"]: r for r in whole["nodes"]}
+    assert set(a) == {r["id"] for r in merged["nodes"]}
+    for r in merged["nodes"]:
+        assert r.get("d") == a[r["id"]].get("d")
+        assert r.get("m") == a[r["id"]].get("m")
+
+
+def test_optimize_tree_explains_and_cancels(deadeye):
+    import threading
+    from pob_mcp.optimizer import TreeOptimizer
+    seen = []
+    res = TreeOptimizer(deadeye, mode="dps", points=6, max_iters=2, swap_radius=4, fill_step=6,
+                        progress=lambda done, total, msg: seen.append(msg)).run()
+    assert any("step" in m for m in seen)
+    branches = res["changes"]["branches"]
+    assert branches and all(b["change"] in ("added", "removed", "mastery switched") for b in branches)
+    assert any(b["change"] == "added" and (b["dps"] or 0) > 0 for b in branches)
+    assert res["timing"]["measure"] > 0
+
+    stop = threading.Event()
+    stop.set()
+    used = deadeye.call("summary")["passivePointsUsed"]
+    res = TreeOptimizer(deadeye, mode="dps", points=5, cancel=stop).run()
+    assert res["iterations"] == 0 and any("cancelled" in n for n in res["notes"])
+    assert deadeye.call("summary")["passivePointsUsed"] == used
+
+
+def test_capped_stats_use_overcap(deadeye):
+    """A target on a capped stat is modelled as capped + overcap, which is linear in the nodes."""
+    from pob_mcp.optimizer import TreeOptimizer
+    opt = TreeOptimizer(deadeye, mode="dps", targets={"FireResist": 75}, points=0, max_iters=0)
+    opt.run()
+    c = next(c for c in opt.constraints if c.stat == "FireResist")
+    assert c.lin == "FireResist+overcap"
+
+
+def test_plan_leveling_nested(occ):
+    from pob_mcp.optimizer import plan_leveling
+    before = occ.call("leveling_info")
+    res = plan_leveling(occ, [30, 60])
+    assert [s["level"] for s in res["plan"]] == [30, 60]
+    a, b = res["plan"]
+    assert a["pointsUsed"] == a["pointsBudget"] and b["pointsUsed"] > a["pointsUsed"]
+    after = occ.call("leveling_info")
+    assert (after["spec"], after["level"], after["used"]) == (before["spec"], before["level"], before["used"])
+    # each stage contains the one before it
+    def nodes(spec):
+        occ.call("apply_edits", {"edits": [{"op": "switch_tree_spec", "spec": spec}]})
+        m = occ.call("tree_model", {"stats": ["@dps"], "lenient": True, "radius": 0})
+        return {r["id"] for r in m["nodes"] if r["alloc"]}
+    first, second = nodes(a["spec"]), nodes(b["spec"])
+    assert first <= second
+
+
+def test_unique_upgrades(deadeye):
+    res = deadeye.call("unique_upgrades", {"slots": ["Ring 2"], "max_loss": 5})
+    assert res["tested"] > 20
+    for u in res["upgrades"]:
+        assert u["slot"] == "Ring 2" and u["score"] >= 0.5
+        assert all(v >= -5 for v in u["pct"].values())

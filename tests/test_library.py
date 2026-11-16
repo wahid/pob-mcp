@@ -55,3 +55,26 @@ def test_own_saves_are_not_reported(srv, tmp_path):
     srv.save_to_pob(name="Mine", folder=str(tmp_path), overwrite=True)
     time.sleep(4.5)
     assert srv.get_build_folder_changes()["changes"] == []
+
+
+def test_pick_within_budget():
+    from pob_mcp.online import pick_within_budget
+    cands = [
+        {"slot": "Boots", "name": "A", "score": 11, "chaos": 4},
+        {"slot": "Boots", "name": "B", "score": 8, "chaos": 1},
+        {"slot": "Belt", "name": "C", "score": 5, "chaos": 50},
+        {"slot": "Ring 1", "name": "D", "score": 6, "chaos": 30},
+        {"slot": "Ring 2", "name": "D", "score": 6, "chaos": 30},
+    ]
+    rich = pick_within_budget(cands, 300)
+    assert {c["name"] for c in rich} == {"A", "C", "D"} and len(rich) == 3  # D once, best boots
+    poor = pick_within_budget(cands, 31)
+    assert sum(c["chaos"] for c in poor) <= 31 and {c["name"] for c in poor} == {"B", "D"}
+    assert pick_within_budget(cands, 0.5) == []
+
+
+def test_trade_query_price_cap():
+    from pob_mcp.online import build_trade_query
+    q = build_trade_query({"stats": [{"tradeId": "x", "weight": 1}], "category": "armour.boots"},
+                          max_price=50, currency="chaos")
+    assert q["query"]["filters"]["trade_filters"]["filters"]["price"] == {"max": 50, "option": "chaos"}

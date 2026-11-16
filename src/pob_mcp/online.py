@@ -97,6 +97,45 @@ def unique_prices(names: list[str], league: str | None = None) -> dict:
             "source": "poe.ninja (prices update about every 15 minutes)"}
 
 
+def unique_price_table(league: str | None = None) -> dict:
+    """Every unique poe.ninja prices in a league: {lower-case name: cheapest listing entry}.
+    Linked (5/6-link) listings are skipped, so body armours and two-handers are priced unlinked."""
+    league = league or current_league()
+    lid = _league_id(league)
+    table: dict[str, dict] = {}
+    for t in UNIQUE_TYPES:
+        data = _get_json(f"{NINJA}/stash/current/item/overview?league={urllib.parse.quote(lid)}&type={t}")
+        for line in data.get("lines", []):
+            if (line.get("links") or 0) >= 5 or line.get("chaosValue") is None:
+                continue
+            key = str(line.get("name", "")).lower()
+            prev = table.get(key)
+            if prev is None or line["chaosValue"] < prev["chaos"]:
+                table[key] = {"chaos": line.get("chaosValue"), "divine": line.get("divineValue"),
+                              "listings": line.get("listingCount"), "variant": line.get("variant")}
+    return {"league": league, "prices": table}
+
+
+def pick_within_budget(candidates: list[dict], budget: float) -> list[dict]:
+    """One upgrade per slot within the budget (an item is used once). Two greedy orders are
+    tried, most score first and most score per chaos first, and the set with more total score
+    wins: the first is right when money is plentiful, the second when it is tight.
+    Candidates need slot, name, score and chaos."""
+    def greedy(key):
+        chosen, slots, names, spent = [], set(), set(), 0.0
+        for c in sorted(candidates, key=key, reverse=True):
+            if c["slot"] in slots or c["name"] in names or spent + c["chaos"] > budget:
+                continue
+            chosen.append(c)
+            slots.add(c["slot"])
+            names.add(c["name"])
+            spent += c["chaos"]
+        return chosen
+
+    plans = [greedy(lambda c: c["score"]), greedy(lambda c: c["score"] / max(c["chaos"], 1.0))]
+    return max(plans, key=lambda p: sum(c["score"] for c in p))
+
+
 # ---------------------------------------------------------------------------
 # Trade-site search links
 # ---------------------------------------------------------------------------
@@ -115,7 +154,8 @@ def trade_url(league: str, query: dict, realm: str = "pc") -> dict:
 
 
 def build_trade_query(weights: dict, min_sum: float | None = None, online: bool = True,
-                      required: list[dict] | None = None) -> dict:
+                      required: list[dict] | None = None, max_price: float | None = None,
+                      currency: str = "chaos") -> dict:
     filters = [{"id": s["tradeId"], "value": {"weight": s["weight"]}} for s in weights["stats"]]
     weight_group: dict = {"type": "weight", "filters": filters}
     if min_sum:
@@ -136,6 +176,9 @@ def build_trade_query(weights: dict, min_sum: float | None = None, online: bool 
         },
         "sort": {"statgroup.0": "desc"},
     }
+    if max_price:
+        query["query"]["filters"]["trade_filters"] = {"filters": {
+            "price": {"max": round(max_price, 1), "option": currency}}}
     return query
 
 

@@ -71,6 +71,9 @@ def pick_metric(st: dict) -> str:
     return max(cands, key=cands.get)
 
 
+_POOLS: dict = {}
+
+
 def run_one(e: PobEngine, path: str, max_seconds: int, hit_target: float, max_path_cost: int = 10,
             lns_rounds: int = 0, strategies: str = "all", lns_seconds: int | None = None) -> dict:
     xml = Path(path).read_text(encoding="utf-8")
@@ -114,7 +117,11 @@ def run_one(e: PobEngine, path: str, max_seconds: int, hit_target: float, max_pa
         if tw == "ilp":
             # exact optimiser (optimize_tree): max DPS with the same targets as constraints
             from pob_mcp.optimizer import TreeOptimizer
-            out = TreeOptimizer(e, mode="dps", metric=metric, targets=targets, points=budget,
+            from pob_mcp.pool import MeasurePool
+            pool = _POOLS.get(id(e))
+            if pool is None:  # POB_MCP_JOBS=N measures on N processes (default here: 1)
+                pool = _POOLS[id(e)] = MeasurePool(e, int(os.environ.get("POB_MCP_JOBS", "1")))
+            out = TreeOptimizer(e, mode="dps", metric=metric, targets=targets, points=budget, pool=pool,
                                 weights={"dps": 1, "ehp": 0, "hit": 0}, max_seconds=max_seconds * 3).run()
             bad = {v["stat"] for v in out["violations"]}
             res = {"targets": {k: {"target": t, "value": out["final"].get(k), "met": k not in bad}

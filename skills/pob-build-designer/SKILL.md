@@ -130,7 +130,12 @@ Equip what a player at the target budget would really own (gear-and-progression.
    "defence", with `avoid` for anything you rejected and `require` for build-defining
    picks. It solves the whole tree at once (paths and region swaps included) and takes a
    few minutes. For "as much damage as possible while meeting these minimums" use
-   `weights={"dps": 1, "ehp": 0, "hit": 0}` with `targets`. `auto_allocate_passives` is
+   `weights={"dps": 1, "ehp": 0, "hit": 0}` with `targets`. Read `changes` in the result:
+   it lists each added and removed branch with what it is worth, and
+   `removedWithoutMeasuredValue` names picks dropped because no scored stat sees them
+   (leech, charge or flask upkeep). Put the ones the build relies on in `keep` and run it
+   again. `keystones="auto"` (or a list) tests keystones the tree lacks by rebuilding the
+   tree around each, and `anoint=true` picks the amulet anoint. `auto_allocate_passives` is
    the faster greedy alternative for adding a few points. Either way, give it
    the defense benchmarks as `targets` (for example `{"PhysicalMaximumHitTaken": 10000,
    "LightningMaximumHitTaken": 30000}` for T16 mapping): it closes those gaps first,
@@ -195,8 +200,11 @@ rankings shift as buckets fill.
 
 ### 8. Progression, cost and export
 
-- `plan_leveling` for 30/50/70/90 trees when the user will level the build.
+- `plan_leveling` for 30/50/70/90 trees when the user will level the build: each stage is the
+  best tree for that level and contains the one before, so there is no respec on the way.
 - Item sets for budget stages (`add_item_set`): starter gear, then upgrades.
+- `budget_upgrades(budget)` when the user names what they can spend: priced uniques that
+  beat what is equipped, a plan for the whole budget, and price-capped searches for rares.
 - `rank_gear_upgrades` for the next purchases: the single mod change per rare slot that
   gains the most (with what it replaces and any resist it would uncap). Then
   `trade_search` for those items and `price_check` for the uniques, to estimate cost.

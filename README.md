@@ -50,6 +50,7 @@ for the same build and config.
 | `load_ladder_build` | Load a real poe.ninja ladder character (random, top, by rank, or by account/character; filter by ascendancy/skill) |
 | `audit_config` | Switch off each enabled Configuration condition in turn and show what it was worth for DPS, EHP and max hits |
 | `rank_gear_upgrades` | The best single mod change per rare slot (new mod in a free affix or replacing the weakest), with resist-cap warnings |
+| `budget_upgrades` | The best gear you can buy for a budget in chaos or divine: every unique that fits each slot is tried in PoB and priced with poe.ninja, a plan for the whole budget is checked together, and rares get a trade search capped at the budget |
 | `rank_anoints` | Every anointable notable ranked by its value on this build, with the oils needed |
 | `list_ascendancy_notables` | Every ascendancy's notables (or one) with exact stats, read live from PoB |
 | `list_keystones` | All keystones with their stats, allocation and path cost |
@@ -74,8 +75,8 @@ for the same build and config.
 | `list_item_slots` | Gear slots plus allocated tree jewel sockets |
 | `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards; also picks mastery effects, sockets planned `jewels`, and can `anoint`. `require` forces nodes (or `{node, effect}` masteries) in first, and they stay through LNS |
 | `target_report` | For each target stat: value, slack, cap and over-cap, which allocated picks hold it up, and its modifier sources; tightest first |
-| `optimize_tree` | Exact optimiser for the whole tree: `mode` dps / balanced / defence. PoB measures every node and mastery effect, an integer program (HiGHS) picks the best connected tree within the points, PoB recalculates it, repeat. Rebuilds an existing tree as well as filling an empty one; `targets`, `require`, `avoid`, `keep`; `apply=false` previews without changing the build |
-| `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree, most valuable nodes first |
+| `optimize_tree` | Exact optimiser for the whole tree: `mode` dps / balanced / defence. PoB measures every node and mastery effect (on several PoB processes, `jobs`), an integer program (HiGHS) picks the best connected tree within the points, PoB recalculates it, repeat. Rebuilds an existing tree as well as filling an empty one; `targets`, `require`, `avoid`, `keep`. `keystones` tries keystones the tree doesn't have and re-optimises around each; `anoint=true` picks the amulet anoint. Reports progress, can be cancelled, and explains the result: each added or removed branch with what it is worth. `apply=false` previews without changing the build |
+| `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree. Default `method="nested"`: the exact optimiser picks the best tree for each level's points, each stage contains the one before (no respec), masteries included. `method="greedy"` is the older quick planner |
 | `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
 | `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |
 
@@ -241,7 +242,7 @@ seconds; if it reaches its time limit, the progress is kept and calling it again
 
 ### Online features
 
-`trade_search`, `price_check`, `popular_builds`, `load_ladder_build` and `import_character` use the internet; everything else runs
+`trade_search`, `price_check`, `budget_upgrades`, `popular_builds`, `load_ladder_build` and `import_character` use the internet; everything else runs
 offline.
 
 - **Prices** come from [poe.ninja](https://poe.ninja/docs/api). Responses are cached for 15

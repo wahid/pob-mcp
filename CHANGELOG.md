@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2
 
 `optimize_tree`
 - Measures on several PoB processes (`jobs`, default one per core up to 4; `POB_MCP_JOBS`

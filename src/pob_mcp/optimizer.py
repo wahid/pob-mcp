@@ -450,7 +450,7 @@ class TreeOptimizer:
                     start[arcs[(parent[k], k)]] = size[k]
                 else:
                     start[root_arc[k]] = size[k]
-                    if nodes[k]["type"] != "ClassStart" and size[k] > 1:
+                    if nodes[k]["type"] != "ClassStart" and not nodes[k].get("entry") and size[k] > 1:
                         ok = False  # a leap node feeding others: not a valid start
             bad = []
             for c in range(n):

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.2
+
+`optimize_tree`
+- Measures on several PoB processes (`jobs`, default one per core up to 4; `POB_MCP_JOBS`
+  sets it). Same tree, about 30% less time on 2 cores, more with more cores.
+- Reports progress after every step and can be cancelled; a cancelled run keeps the best
+  tree found so far.
+- `keystones` ("auto" or names): each candidate is forced in and the tree re-optimised around
+  it; the best result is kept and `keystoneVariants` lists what was tried.
+- `anoint=true` picks the amulet anoint that scores best on the finished tree.
+- The result explains itself: `changes` lists every added or removed branch and switched
+  mastery with what it is worth, and names removed picks that no scored stat measures.
+- Capped stats (resistances, block, spell suppression) are modelled as capped + overcap, so
+  dropping over-capped nodes is no longer seen as free; capped elemental resistances stay
+  capped; a step that just misses a target is solved again with a margin.
+- A socket whose jewel is still in its slot (after a tree reset) is valued.
+
+New tools and options
+- `plan_leveling(method="nested")`, now the default: the exact optimiser builds each level's
+  tree from the final tree's nodes, each stage contains the one before (no respec), and
+  masteries are included. `method="greedy"` keeps the old planner.
+- `budget_upgrades`: the best gear for a budget in chaos or divine. Uniques are tried in
+  PoB and priced with poe.ninja, a plan for the whole budget is checked together, and rares
+  get a trade search capped at the budget.
+
 ## 0.5.1
 
 New tools

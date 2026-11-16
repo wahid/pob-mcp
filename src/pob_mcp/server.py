@@ -16,9 +16,9 @@ from typing import Any, Literal, Optional
 
 try:  # MCP Python SDK 2.x
     from mcp.server.mcpserver import MCPServer as FastMCP
-    from mcp.server.mcpserver import Image
+    from mcp.server.mcpserver import Context, Image
 except ImportError:  # MCP Python SDK 1.x
-    from mcp.server.fastmcp import FastMCP, Image
+    from mcp.server.fastmcp import Context, FastMCP, Image
 from pydantic import BaseModel, Field
 
 from . import library, online
@@ -60,6 +60,58 @@ engine: PobEngine | None = None
 _history: list[str] = []          # XML snapshots for undo
 _source: dict = {}                # {"path": Path, "mtime": float} when loaded from a saved build
 _MAX_HISTORY = 20
+_pool = None                      # MeasurePool, created on first use
+
+
+def _measure_pool(jobs: int | None):
+    """Helper PoB processes for optimize_tree; `jobs` counts the main engine too."""
+    global _pool
+    from .pool import MeasurePool, default_jobs
+    jobs = max(1, min(int(jobs), 8)) if jobs else default_jobs()
+    if _pool is None:
+        _pool = MeasurePool(_engine(), jobs)
+    else:
+        _pool.jobs = jobs
+    return _pool
+
+
+async def _run_with_progress(ctx, work):
+    """Run blocking `work(progress, cancel)` in a thread; relay progress to the client and stop
+    the work (keeping its best result so far) when the client cancels the request."""
+    import threading
+
+    import anyio
+
+    cancel = threading.Event()
+    done = anyio.Event()
+    box: dict = {}
+
+    def progress(elapsed, total, message):
+        if ctx is None:
+            return
+        try:
+            anyio.from_thread.run(ctx.report_progress, round(elapsed, 1), float(total), message)
+        except Exception:  # noqa: BLE001 - a client that went away must not stop the run
+            pass
+
+    def run():
+        try:
+            box["result"] = work(progress, cancel)
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+        finally:
+            anyio.from_thread.run_sync(done.set)
+
+    try:
+        await anyio.to_thread.run_sync(run, abandon_on_cancel=True)
+    except anyio.get_cancelled_exc_class():
+        cancel.set()
+        with anyio.CancelScope(shield=True):  # let the step in flight finish and tidy up
+            await done.wait()
+        raise
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def _engine() -> PobEngine:
@@ -671,7 +723,7 @@ def auto_allocate_passives(
 
 
 @mcp.tool()
-def optimize_tree(
+async def optimize_tree(
     mode: Literal["dps", "balanced", "defence"] = "balanced",
     points: int | None = None,
     targets: dict[str, float] | None = None,
@@ -686,6 +738,10 @@ def optimize_tree(
     swap_radius: int = 8,
     fill_step: int = 10,
     apply: bool = True,
+    jobs: int | None = None,
+    keystones: list[str] | Literal["auto"] | None = None,
+    anoint: bool = False,
+    ctx: Context | None = None,
 ) -> dict:
     """Re-optimise the whole passive tree with an exact solver (integer programming) instead of
     the greedy one. Unlike auto_allocate_passives it sees long paths, swaps whole regions, and
@@ -713,16 +769,28 @@ def optimize_tree(
     Each step changes at most `swap_radius` allocated nodes and adds at most `fill_step`
     points beyond that; only nodes within that reach of the tree are measured, which keeps
     each integer program small enough to solve well in `mip_seconds`.
-    A run takes a few minutes (each re-measure is a few thousand PoB calculations). The result
-    has start/final stats, ratios, what was added and removed, and the per-iteration history.
-    undo_last_change reverts it. With `apply=false` it is a preview: the result is the same, but
-    the build is put back as it was (nothing to undo).
+    A run takes a few minutes (each re-measure is a few thousand PoB calculations, spread over
+    `jobs` PoB processes: default one per core up to 4, about 300 MB each). Progress is reported
+    after every step, and cancelling the request keeps the best tree found so far.
+
+    `keystones` tries keystones the tree doesn't have: "auto" picks up to two within reach, or
+    name them. Each is forced in and the tree re-optimised around it (a keystone often only
+    pays once the rest of the tree is rebuilt for it); the best-scoring result is kept and
+    `keystoneVariants` lists what was tried. Roughly doubles the run time.
+    `anoint=true` then picks the amulet anoint that scores best on the finished tree.
+
+    The result has start/final stats, ratios, what was added and removed, `changes` (each added
+    or removed branch and switched mastery with what it is worth), and the per-iteration
+    history. undo_last_change reverts it. With `apply=false` it is a preview: the result is the
+    same, but the build is put back as it was (nothing to undo).
     """
-    from .optimizer import TreeOptimizer
+    from .optimizer import optimize
 
     e = _engine()
     e.require_build()
     snapshot = e.call("export_xml")["xml"]
+    if isinstance(keystones, list):
+        keystones = keystones[:4]
 
     # Server-side safety caps for untrusted tool callers.
     # Keep defaults unchanged while preventing runaway requests.
@@ -733,24 +801,30 @@ def optimize_tree(
     if points is not None:
         points = max(0, min(int(points), 150))  # a full tree is 123 points plus quest/jewel extras
 
-    opt = TreeOptimizer(e, mode=mode, metric=metric, targets=targets, points=points, keep=keep,
-                        require=require, avoid=avoid, include_keystones=include_keystones,
-                        weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,
-                        swap_radius=swap_radius, fill_step=fill_step)
-    try:
-        res = opt.run()
-    except Exception:
-        if not apply:
+    pool = _measure_pool(jobs)
+
+    def work(progress, cancel):
+        try:
+            res = optimize(e, keystones=keystones, anoint=anoint,
+                           mode=mode, metric=metric, targets=targets, points=points, keep=keep,
+                           require=require, avoid=avoid, include_keystones=include_keystones,
+                           weights=weights, max_seconds=max_seconds, mip_seconds=mip_seconds,
+                           swap_radius=swap_radius, fill_step=fill_step,
+                           pool=pool, progress=progress, cancel=cancel)
+        except Exception:
+            if not apply:
+                e.call("load_xml", {"xml": snapshot, "name": "Build"})
+            raise
+        res["applied"] = apply
+        if apply:
+            _history.append(snapshot)
+            del _history[:-_MAX_HISTORY]
+        else:
             e.call("load_xml", {"xml": snapshot, "name": "Build"})
-        raise
-    res["applied"] = apply
-    if apply:
-        _history.append(snapshot)
-        del _history[:-_MAX_HISTORY]
-    else:
-        e.call("load_xml", {"xml": snapshot, "name": "Build"})
-    res["undo_available"] = len(_history)
-    return res
+        res["undo_available"] = len(_history)
+        return res
+
+    return await _run_with_progress(ctx, work)
 
 
 # ---------------------------------------------------------------------------
@@ -1032,13 +1106,36 @@ def list_tree_specs() -> dict:
 
 
 @mcp.tool()
-def plan_leveling(levels: list[int] | None = None, weights: dict[str, float] | None = None) -> dict:
+async def plan_leveling(levels: list[int] | None = None, weights: dict[str, float] | None = None,
+                        method: Literal["nested", "greedy"] = "nested",
+                        mode: Literal["dps", "balanced", "defence"] = "balanced",
+                        jobs: int | None = None, ctx: Context | None = None) -> dict:
     """Create a leveling tree spec for each level (default 30, 50, 70, 90), each one built only
-    from nodes in the current (final) tree, choosing the most valuable nodes first by `weights`
-    (default main DPS + TotalEHP), with that level's passive and ascendancy points. The final
-    tree stays active. Masteries are left out of the leveling trees."""
+    from nodes in the current (final) tree with that level's passive and ascendancy points. The
+    final tree stays active.
+
+    method "nested" (default) uses the exact optimiser (as optimize_tree, `mode` picks the
+    balance): each stage is the best tree for its points and contains the stage before it, so
+    leveling never needs a respec; masteries are included with the final tree's effects, and
+    each stage lists the notables and masteries to pick up. Takes a minute or two.
+    method "greedy" is the older, faster planner: stages are chosen independently by `weights`
+    (default main DPS + TotalEHP), most valuable notable first, without masteries."""
     snapshot = _call("export_xml")["xml"]
-    res = _call("plan_leveling", {"levels": levels or [], "weights": weights})
+    if method == "nested":
+        from .optimizer import plan_leveling as plan_nested
+        e = _engine()
+        pool = _measure_pool(jobs)
+
+        def work(progress, cancel):
+            try:
+                return plan_nested(e, levels, mode=mode, pool=pool, progress=progress, cancel=cancel)
+            except Exception:
+                e.call("load_xml", {"xml": snapshot, "name": "Build"})
+                raise
+
+        res = await _run_with_progress(ctx, work)
+    else:
+        res = _call("plan_leveling", {"levels": levels or [], "weights": weights})
     _history.append(snapshot)
     del _history[:-_MAX_HISTORY]
     res["undo_available"] = len(_history)
@@ -1169,6 +1266,106 @@ def rank_gear_upgrades(weights: dict[str, float] | None = None, slots: list[str]
     are listed as skipped. Use trade_search on the upgraded item to see what it costs."""
     return _call("gear_upgrades", {"weights": weights, "slots": slots, "max_tier": max_tier,
                                    "roll": roll, "per_slot": per_slot})
+
+
+@mcp.tool()
+def budget_upgrades(budget: float, currency: Literal["chaos", "divine"] = "chaos",
+                    weights: dict[str, float] | None = None, slots: list[str] | None = None,
+                    top: int = 10, league: str | None = None, max_loss: float = 5) -> dict:
+    """The best gear upgrades you can buy for `budget` (in chaos or divine).
+
+    Uniques: every unique that fits each gear slot is tried in PoB (default rolls, latest
+    variant) and scored by `weights` (default main DPS 1 + TotalEHP 0.5); those that score
+    better than what is equipped are priced with poe.ninja and the ones within budget are
+    listed with their gain per chaos. A unique that costs more than `max_loss` % of DPS, EHP,
+    life or a max hit is not counted as an upgrade (raise it to allow trade-offs). `plan` is the best set to buy with the whole budget (one
+    item per slot, most gain per chaos first), with the stats of buying them all together.
+    Rares can't be priced automatically, so for the slots where a single better mod gains the
+    most you get a trade-site search capped at the budget (`rareSearches`).
+
+    Check before buying: prices are for unlinked items with any rolls (a 6-link or a perfect roll
+    costs more), PoB can't count everything a unique you replace does (flask effects from
+    Mageblood, returning projectiles from Nimis, on-kill effects), and `warning` flags uniques
+    that would break a resistance cap or an attribute requirement. Nothing is changed in the
+    build; equip a pick with an equip_unique edit."""
+    if budget <= 0:
+        raise PobError("budget must be more than 0")
+    top = max(1, min(top, 30))
+    max_loss = max(0.0, min(float(max_loss), 100.0))
+    found = _call("unique_upgrades", {"weights": weights, "slots": slots, "max_loss": max_loss})
+    table = online.unique_price_table(league)
+    prices = table["prices"]
+    rate = next((p["chaos"] / p["divine"] for p in prices.values()
+                 if p.get("divine") and p["divine"] >= 1 and p.get("chaos")), None)
+    if currency == "divine" and not rate:
+        raise PobError("Could not work out the divine price from poe.ninja; give the budget in chaos")
+    budget_chaos = budget * rate if currency == "divine" else budget
+    affordable, too_dear, unpriced = [], [], []
+    for u in found["upgrades"]:
+        price = prices.get(u["name"].lower())
+        if not price:
+            unpriced.append(u["name"])
+            continue
+        entry = {**u, "chaos": price["chaos"], "divine": price.get("divine"), "listings": price.get("listings"),
+                 "scorePerChaos": round(u["score"] / max(price["chaos"], 1.0), 3)}
+        if price.get("variant"):
+            entry["pricedVariant"] = price["variant"]
+        if u["slot"] in ("Body Armour", "Weapon 1"):
+            entry["priceNote"] = "unlinked price; a 6-link costs more"
+        # replacing something far more valuable usually means PoB isn't counting what it does
+        old = prices.get(str(u.get("replaces") or "").split(",")[0].strip().lower())
+        if old and old["chaos"] > 5 * max(price["chaos"], 1.0) and old["chaos"] > budget_chaos:
+            entry["replacesWorthChaos"] = old["chaos"]
+            entry["caution"] = ("replaces an item worth far more than this one: PoB is probably not counting "
+                                "everything it does, so this is left out of the plan")
+        (affordable if price["chaos"] <= budget_chaos else too_dear).append(entry)
+    plan = online.pick_within_budget([c for c in affordable if "caution" not in c], budget_chaos)
+    together = None
+    keys = list(dict.fromkeys([*found["weights"], "TotalEHP", "Life", "PhysicalMaximumHitTaken"]))
+    while plan:
+        # the picks are valued one at a time; check them together and drop the weakest if the
+        # set costs too much of something
+        edits = [{"op": "equip_unique", "name": c["name"], "slot": c["slot"]} for c in plan]
+        try:
+            ch = _call("compare_edits", {"edits": edits, "extra_stats": keys})["changes"]
+        except PobError as exc:
+            together = {"error": str(exc)}
+            break
+        together = {k: v.get("pct") for k, v in ch.items()
+                    if k in keys and isinstance(v, dict) and v.get("pct") is not None}
+        if len(plan) == 1 or min(together.values(), default=0) >= -max_loss:
+            break
+        plan = sorted(plan, key=lambda c: c["scorePerChaos"])[1:]
+    searches = []
+    try:
+        rare = _call("gear_upgrades", {"weights": weights, "slots": slots, "per_slot": 1})["upgrades"][:3]
+    except PobError:
+        rare = []
+    for r in rare:
+        try:
+            w = _call("trade_weights", {"slot": r["slot"], "weights": weights, "max_stats": 20})
+            if not w["stats"]:
+                continue
+            query = online.build_trade_query(w, min_sum=w.get("currentWeightedSum") or None,
+                                             max_price=budget, currency=currency)
+            searches.append({"slot": r["slot"], "item": r["item"], "bestSingleMod": r["add"],
+                             "replaces": r.get("replaces"), "score": r["score"],
+                             **online.trade_url(table["league"], query)})
+        except PobError:
+            continue
+    return {
+        "league": table["league"], "budget": budget, "currency": currency,
+        "budgetChaos": round(budget_chaos, 1), "chaosPerDivine": round(rate, 1) if rate else None,
+        "weights": found["weights"],
+        "plan": {"buy": plan, "totalChaos": round(sum(c["chaos"] for c in plan), 1),
+                 "statsTogetherPct": together} if plan else None,
+        "uniquesWithinBudget": sorted(affordable, key=lambda c: -c["score"])[:top],
+        "bestOverBudget": sorted(too_dear, key=lambda c: -c["score"])[:3],
+        "notPricedOnPoeNinja": unpriced[:10] or None,
+        "rareSearches": searches,
+        "note": "score is the weighted % gain. Prices: poe.ninja, about 15 minutes old. Rare searches "
+                "open on the trade site, better than your current item and capped at the budget.",
+    }
 
 
 @mcp.tool()

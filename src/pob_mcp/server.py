@@ -110,7 +110,12 @@ async def _run_with_progress(ctx, work):
             await done.wait()
         raise
     if "error" in box:
-        raise box["error"]
+        exc = box["error"]
+        if isinstance(exc, PobError):
+            raise exc
+        # anything unexpected: say what it was, so the client doesn't only see "Error executing tool"
+        log.exception("Tool failed", exc_info=exc)
+        raise PobError(f"{type(exc).__name__}: {exc}") from exc
     return box["result"]
 
 

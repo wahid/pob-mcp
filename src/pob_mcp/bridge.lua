@@ -5874,6 +5874,7 @@ function API.timeless_scan(p)
 			end
 			local top = {}
 			local lowest = -math.huge
+			local bestScore, ties = -math.huge, 0
 			for seed = seedLo, seedHi, mult do
 				local score = 0
 				for _, nt in ipairs(notables) do
@@ -5896,6 +5897,11 @@ function API.timeless_scan(p)
 						local g = total - nt.cost * lambda
 						if g > 0 then score = score + g end
 					end
+				end
+				if score > bestScore + 1e-9 then
+					bestScore, ties = score, 1
+				elseif score >= bestScore - 1e-9 then
+					ties = ties + 1
 				end
 				if #top < perSocket or score > lowest then
 					top[#top + 1] = { seed = seed, score = score }
@@ -5924,7 +5930,10 @@ function API.timeless_scan(p)
 					local total = (newVal or own) + extra
 					local gain = nt.alloc and (total - own) or (total - nt.cost * lambda)
 					if nt.alloc or gain > 0 then
-						changes[#changes + 1] = { node = nt.node.dn, id = nt.id, allocated = nt.alloc or nil,
+						-- the tree's own name: in a socket that already holds a timeless jewel the
+						-- spec node carries that jewel's conquered name
+						local orig = spec.tree.nodes[nt.id]
+						changes[#changes + 1] = { node = orig and orig.dn or nt.node.dn, id = nt.id, allocated = nt.alloc or nil,
 							becomes = becomes, adds = #adds > 0 and adds or nil, cost = nt.alloc and nil or nt.cost,
 							gain = gain }
 						if not nt.alloc then picks[#picks + 1] = nt.id end
@@ -5949,7 +5958,7 @@ function API.timeless_scan(p)
 			results[#results + 1] = { socket = id, near = near, allocated = socket.alloc or nil,
 				pathCost = cost, current = cur and cur.name or nil, notablesInRadius = #notables,
 				allocatedSmallsInRadius = smallsIn, keystonesInRadius = #keystones > 0 and keystones or nil,
-				seeds = top }
+				seeds = top, seedsTiedWithBest = ties }
 		end
 	end
 	table.sort(results, function(a, b) return (a.seeds[1] and a.seeds[1].score or 0) > (b.seeds[1] and b.seeds[1].score or 0) end)

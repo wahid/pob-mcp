@@ -582,6 +582,7 @@ def test_timeless_scan_and_trial(occ):
     for s in scan["sockets"]:
         assert s["pathCost"] <= 8 and len(s["seeds"]) <= 2
         assert s.get("current") is None  # sockets holding jewels are skipped by default
+        assert s["seedsTiedWithBest"] >= 1
         for c in s["seeds"]:
             assert 2000 <= c["seed"] <= 160000 and c["seed"] % 20 == 0
     s = scan["sockets"][0]
@@ -607,3 +608,13 @@ def test_find_timeless_quick(occ):
     assert res["best"]["trade"].startswith("https://www.pathofexile.com/trade/search/Standard/")
     assert res["verdict"]
     assert occ.call("summary")["passivePointsUsed"] == used
+
+
+def test_find_timeless_with_requirements_ignored(occ):
+    """A build where PoB reports no attribute requirements at all (e.g. Supreme Ostentation)
+    used to crash the finder: the stats reply was an empty list."""
+    from pob_mcp.optimizer import stats_of
+    assert stats_of(occ, ["NoSuchStatAtAll"]) == {}
+    from pob_mcp.timeless import find
+    res = find(occ, "Militant Faith", "Avarius", rebuild=0, trials=1, max_path=8, apply=False, league="Standard")
+    assert res["verdict"]

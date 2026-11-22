@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 
 from . import online
-from .optimizer import ELE_RESISTS, TreeOptimizer
+from .optimizer import ELE_RESISTS, TreeOptimizer, stats_of
 
 JEWELS = {
     "glorious vanity": ("Glorious Vanity", ["Doryani", "Xibaqua", "Ahuana"]),
@@ -78,7 +78,7 @@ def find(engine, jewel: str, conqueror: str, *, mode: str = "balanced", weights=
 
     scorer = TreeOptimizer(engine, mode=mode, weights=weights, targets=targets, explain=False)
     base = scorer.prepare()
-    base = {**base, **{k: v or 0 for k, v in engine.call("stats", {"keys": ["ReqStr", "ReqDex", "ReqInt"]}).items()}}
+    base = {**base, **{k: v or 0 for k, v in stats_of(engine, ["ReqStr", "ReqDex", "ReqInt"]).items()}}
     for k in ("ReqStr", "ReqDex", "ReqInt"):
         base.setdefault(k, 0)
     start_u = scorer.utility(base)
@@ -113,7 +113,7 @@ def find(engine, jewel: str, conqueror: str, *, mode: str = "balanced", weights=
                             "(raise max_path, or replace_jewels=true to consider sockets holding jewels)")}
 
     stats = list(dict.fromkeys([*scorer.stat_names, "Life", "ReqStr", "ReqDex", "ReqInt"]))
-    base = {**base, **engine.call("stats", {"keys": ["Life"]})}
+    base = {**base, **stats_of(engine, ["Life"])}
     checked, done = [], set()
 
     def trial(c):
@@ -173,6 +173,8 @@ def find(engine, jewel: str, conqueror: str, *, mode: str = "balanced", weights=
             out["breaks"] = [{"stat": b["stat"], "value": b["value"], "needs": b["target"]} for b in breaks]
         if s.get("keystonesInRadius"):
             out["keystonesInRadius"] = s["keystonesInRadius"]
+        if (s.get("seedsTiedWithBest") or 0) > 1 and c["seed"] == s["seeds"][0]["seed"]:
+            out["seedsTiedWithBest"] = s["seedsTiedWithBest"]
         if tr.get("otherHistoric"):
             out["note"] = f"replaces your {tr['otherHistoric']} (only one Historic jewel counts)"
         return out
@@ -196,7 +198,7 @@ def find(engine, jewel: str, conqueror: str, *, mode: str = "balanced", weights=
                                 pool=pool, cancel=cancel, explain=False,
                                 max_seconds=max(30.0, (max_seconds - (time.time() - t0)) / runs - 5))
             res = opt.run()
-            final = {**res["final"], **engine.call("stats", {"keys": ["Life"]})}
+            final = {**res["final"], **stats_of(engine, ["Life"])}
             baseline = {"final": final, "utility": scorer.utility(final)}
         finally:
             engine.call("load_xml", {"xml": snapshot, "name": "Build"})
@@ -213,7 +215,7 @@ def find(engine, jewel: str, conqueror: str, *, mode: str = "balanced", weights=
                                     keep=[c["socket"]["socket"]], pool=pool, cancel=cancel, explain=False,
                                     max_seconds=max(30.0, left / max(1, min(rebuild, len(checked)) - n) - 5))
                 res = opt.run()
-                final = {**res["final"], **engine.call("stats", {"keys": ["Life"]})}
+                final = {**res["final"], **stats_of(engine, ["Life"])}
                 ref = baseline["utility"] if baseline else start_u
                 gain = round((scorer.utility(final) - ref) * 100, 2)
                 rebuilt.append({"cand": c, "final": final, "gain": gain, "xml": engine.call("export_xml")["xml"],
@@ -299,6 +301,9 @@ def find(engine, jewel: str, conqueror: str, *, mode: str = "balanced", weights=
         out["verdict"] = (f"Seed {b['seed']} in the socket near {b['socketNear']}: +{best_gain}% score"
                           + (" after rebuilding the tree around it." if b.get("rebuilt") else
                              " on the current tree (not rebuilt)."))
+        if (b.get("seedsTiedWithBest") or 0) > 1:
+            out["verdict"] += (f" {b['seedsTiedWithBest']} seeds give this socket the same result, so the exact "
+                               "seed hardly matters here: buy whichever is cheapest (tradeTopSeeds).")
     elif hopeful:
         seeds = ", ".join(str(r["seed"]) for r in hopeful[:3])
         out["verdict"] = (f"Not confirmed: the rebuilt candidates lose, but seeds {seeds} look up to "

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.4
+
+- `find_timeless_jewel` no longer fails on builds whose attribute requirements PoB doesn't
+  report (for example with Supreme Ostentation from Caspiro's Elegant Hubris): the tool
+  stopped with only "Error executing tool".
+- Notables in a socket that already holds a timeless jewel are listed by their tree names,
+  not by what the current jewel turned them into.
+- When many seeds give a socket the same result (common with Militant Faith), the result
+  says how many, so the cheapest one can be bought.
+- Unexpected errors in optimize_tree, plan_leveling and find_timeless_jewel now say what went
+  wrong instead of only "Error executing tool".
+
 ## 0.5.3
 
 - `find_timeless_jewel`: the best seed and socket for a timeless jewel and conqueror (Lethal

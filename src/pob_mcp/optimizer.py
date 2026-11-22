@@ -974,8 +974,15 @@ def _after(stats, changes):
     return out
 
 
+def stats_of(engine, names) -> dict:
+    """engine.call("stats") as a dict: PoB leaves out stats it has no value for (an ignored
+    attribute requirement, say), and when none are left the reply is an empty list."""
+    out = engine.call("stats", {"keys": list(names)})
+    return out if isinstance(out, dict) else {}
+
+
 def _stats_now(engine, names):
-    return engine.call("stats", {"keys": list(names)})
+    return stats_of(engine, names)
 
 
 def optimize(engine, *, keystones=None, max_variants: int = 2, anoint: bool = False, **opts) -> dict:

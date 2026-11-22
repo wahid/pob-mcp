@@ -1106,6 +1106,74 @@ def list_tree_specs() -> dict:
 
 
 @mcp.tool()
+async def find_timeless_jewel(
+    jewel: Literal["Elegant Hubris", "Lethal Pride", "Brutal Restraint", "Militant Faith", "Heroic Tragedy"],
+    conqueror: str,
+    mode: Literal["dps", "balanced", "defence"] = "balanced",
+    weights: dict[str, float] | None = None,
+    targets: dict[str, float] | None = None,
+    sockets: list[int] | None = None,
+    max_path: int = 8,
+    max_pick: int = 3,
+    replace_jewels: bool = False,
+    rebuild: int = 2,
+    apply: bool = True,
+    max_seconds: int = 900,
+    league: str | None = None,
+    jobs: int | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    """Find the best seed and socket for a timeless jewel, e.g. jewel="Elegant Hubris",
+    conqueror="Cadiro".
+
+    Every seed of the jewel is tried in every jewel socket that is allocated or within
+    `max_path` points of the tree (or only `sockets`, by node id). The scan values what each seed
+    turns the notables in radius into, using the same score as optimize_tree (`mode`, `weights`,
+    `targets`), and also counts unallocated notables in radius within `max_pick` points that the
+    seed makes worth taking. The best candidates are then equipped for real and calculated by
+    PoB, and for the best `rebuild` of them (default 2) optimize_tree rebuilds the whole tree
+    around the jewel within your current points, which is the honest gain. rebuild=0 is
+    quick (seconds) but counts extra points the jewel needs at the value of a typical point.
+
+    Sockets holding another jewel are skipped unless `replace_jewels` (a timeless jewel already in
+    the tree is replaced: only one Historic jewel counts). The conqueror only decides what a
+    keystone in radius becomes; the notables depend on the seed alone, so `tradeAnyConqueror`
+    finds the same seed with any conqueror. With apply=true the best result (the rebuilt tree
+    when rebuild >= 1) is put in the build; undo_last_change reverts it. Glorious Vanity is not
+    supported yet. Takes a few minutes with rebuild, reports progress and can be cancelled."""
+    from .timeless import find
+
+    e = _engine()
+    e.require_build()
+    max_path = max(0, min(int(max_path), 20))
+    max_pick = max(0, min(int(max_pick), 8))
+    rebuild = max(0, min(int(rebuild), 4))
+    max_seconds = max(30, min(int(max_seconds), 1800))
+    snapshot = e.call("export_xml")["xml"]
+    pool = _measure_pool(jobs)
+
+    def work(progress, cancel):
+        try:
+            res = find(e, jewel, conqueror, mode=mode, weights=weights, targets=targets, sockets=sockets,
+                       max_path=max_path, max_pick=max_pick, replace_jewels=replace_jewels, rebuild=rebuild,
+                       apply=apply, max_seconds=max_seconds, league=league, pool=pool,
+                       progress=progress, cancel=cancel)
+        except ValueError as exc:
+            e.call("load_xml", {"xml": snapshot, "name": "Build"})
+            raise PobError(str(exc)) from exc
+        except Exception:
+            e.call("load_xml", {"xml": snapshot, "name": "Build"})
+            raise
+        if res.get("applied"):
+            _history.append(snapshot)
+            del _history[:-_MAX_HISTORY]
+        res["undo_available"] = len(_history)
+        return res
+
+    return await _run_with_progress(ctx, work)
+
+
+@mcp.tool()
 async def plan_leveling(levels: list[int] | None = None, weights: dict[str, float] | None = None,
                         method: Literal["nested", "greedy"] = "nested",
                         mode: Literal["dps", "balanced", "defence"] = "balanced",

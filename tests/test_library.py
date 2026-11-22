@@ -78,3 +78,18 @@ def test_trade_query_price_cap():
     q = build_trade_query({"stats": [{"tradeId": "x", "weight": 1}], "category": "armour.boots"},
                           max_price=50, currency="chaos")
     assert q["query"]["filters"]["trade_filters"]["filters"]["price"] == {"max": 50, "option": "chaos"}
+
+
+def test_timeless_trade_links():
+    import base64, gzip, json
+    from pob_mcp.timeless import trade_links
+    ids = ["explicit.pseudo_timeless_jewel_cadiro", "explicit.pseudo_timeless_jewel_victario",
+           "explicit.pseudo_timeless_jewel_caspiro"]
+    r = trade_links("Standard", ids, 1, [79620])
+    def decode(url):
+        raw = url.rsplit("/", 1)[1].replace("-", "+").replace("_", "/")
+        return json.loads(gzip.decompress(base64.b64decode(raw)))
+    one = decode(r["trade"])["query"]["stats"][0]
+    assert one["type"] == "count" and one["filters"] == [{"id": ids[0], "value": {"min": 79620, "max": 79620}}]
+    anyc = decode(r["tradeAnyConqueror"])["query"]["stats"][0]
+    assert {f["id"] for f in anyc["filters"]} == set(ids)

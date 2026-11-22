@@ -200,6 +200,9 @@ rankings shift as buckets fill.
 
 ### 8. Progression, cost and export
 
+- `find_timeless_jewel(jewel, conqueror)` when the user wants a timeless jewel: it finds the
+  seed and socket near their tree and rebuilds the tree around it. Pass the conqueror whose
+  keystone they want; if no keystone in radius matters, the `tradeAnyConqueror` link is cheaper.
 - `plan_leveling` for 30/50/70/90 trees when the user will level the build: each stage is the
   best tree for that level and contains the one before, so there is no respec on the way.
 - Item sets for budget stages (`add_item_set`): starter gear, then upgrades.

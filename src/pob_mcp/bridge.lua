@@ -1875,15 +1875,17 @@ function EDIT.reset_tree(e, notes)
 	if #missing > 0 then notes[#notes + 1] = "Could not re-allocate: " .. table.concat(missing, ", ") end
 end
 
-function EDIT.equip_timeless(e, notes)
+-- A timeless jewel item with this seed and conqueror (name: "Elegant Hubris", conqueror: "Cadiro")
+local function makeTimeless(name, conqueror, seed)
+	local e = { name = name, conqueror = conqueror, seed = seed }
 	local want = tostring(e.name or ""):lower()
 	local src = main.uniqueDB.byTitle[want]
 	if not src or src.baseName ~= "Timeless Jewel" then
-		error("Not a timeless jewel: " .. tostring(e.name) .. " (Lethal Pride, Brutal Restraint, Glorious Vanity, Elegant Hubris, Militant Faith)")
+		error("Not a timeless jewel: " .. tostring(e.name) .. " (Lethal Pride, Brutal Restraint, Glorious Vanity, Elegant Hubris, Militant Faith, Heroic Tragedy)", 0)
 	end
 	local raw = src:BuildRaw()
-	local seed = tonumber(e.seed)
-	if not seed then error("equip_timeless needs a numeric seed") end
+	seed = tonumber(e.seed)
+	if not seed then error("equip_timeless needs a numeric seed", 0) end
 	local conq = tostring(e.conqueror or ""):lower()
 	local out, found, conquerors = {}, false, {}
 	for line in raw:gmatch("[^\n]+") do
@@ -1897,7 +1899,7 @@ function EDIT.equip_timeless(e, notes)
 			if not found and who and (conq == "" or who:lower():find(conq, 1, true)) then
 				local lo, hi = text:match("%((%d+)%-(%d+)%)")
 				lo, hi = tonumber(lo), tonumber(hi)
-				if seed < lo or seed > hi then error(("Seed %d is outside %d-%d for %s"):format(seed, lo, hi, src.title)) end
+				if seed < lo or seed > hi then error(("Seed %d is outside %d-%d for %s"):format(seed, lo, hi, src.title), 0) end
 				out[#out + 1] = (text:gsub("%(%d+%-%d+%)", tostring(seed), 1))
 				found = true
 			end
@@ -1906,10 +1908,16 @@ function EDIT.equip_timeless(e, notes)
 		end
 	end
 	if not found then
-		error(("No conqueror matching '%s' for %s. Options: %s"):format(tostring(e.conqueror), src.title, table.concat(conquerors, ", ")))
+		error(("No conqueror matching '%s' for %s. Options: %s"):format(tostring(e.conqueror), src.title, table.concat(conquerors, ", ")), 0)
 	end
 	local item = new("Item"):Item(table.concat(out, "\n"))
 	item:BuildModList()
+	return item, src.title
+end
+
+function EDIT.equip_timeless(e, notes)
+	local item = makeTimeless(e.name, e.conqueror, e.seed)
+	local seed = tonumber(e.seed)
 	local slotName = e.slot
 	if not slotName and e.node then
 		local node = resolveNode(e.node)
@@ -5401,6 +5409,15 @@ function API.tree_model(p)
 		end
 		return set
 	end
+	if p.base_only then
+		-- just the score's inputs (the timeless jewel finder scores trials with them)
+		local base2 = {}
+		for i, s in ipairs(stats) do base2[s] = baseVals[i] end
+		return { stats = stats, dropped = #dropped > 0 and dropped or nil, base = base2, nodes = {},
+			used = spec:CountAllocNodes(), budget = pointBudget(), excludedPoints = 0, calcs = 0,
+			required = { Str = num(base.ReqStr), Dex = num(base.ReqDex), Int = num(base.ReqInt) },
+			reserved = { Mana = num(base.ManaReserved), Life = num(base.LifeReserved) } }
+	end
 	local keep, req, avoid = refSet(p.keep), refSet(p.require), refSet(p.avoid)
 	local route = distanceRouteNodes()
 	local startId = spec.curClass.startNodeId
@@ -5689,6 +5706,354 @@ function API.leveling_info()
 	local build = B()
 	return { spec = build.treeTab.activeSpec, level = build.characterLevel,
 		auto = build.characterLevelAutoMode or false, used = build.spec:CountAllocNodes() }
+end
+
+-------------------------------------------------------------------------------
+-- Timeless jewels: which seed, in which socket near the tree, is worth the most
+-------------------------------------------------------------------------------
+
+local TIMELESS = {
+	["glorious vanity"] = { t = 1, who = { "Doryani", "Xibaqua", "Ahuana" } },
+	["lethal pride"] = { t = 2, who = { "Kaom", "Rakiata", "Akoya" } },
+	["brutal restraint"] = { t = 3, who = { "Asenath", "Nasima", "Balbala" } },
+	["militant faith"] = { t = 4, who = { "Avarius", "Dominus", "Maxarius" } },
+	["elegant hubris"] = { t = 5, who = { "Cadiro", "Victario", "Caspiro" } },
+	["heroic tragedy"] = { t = 6, who = { "Vorana", "Uhtred", "Medved" } },
+}
+
+local function timelessInfo(name, conqueror)
+	local info = TIMELESS[tostring(name or ""):lower()]
+	if not info then
+		error("Unknown timeless jewel: " .. tostring(name) .. " (Lethal Pride, Brutal Restraint, Militant Faith, Elegant Hubris, Heroic Tragedy, Glorious Vanity)", 0)
+	end
+	local idx
+	for i, who in ipairs(info.who) do
+		if who:lower() == tostring(conqueror or ""):lower() then idx = i end
+	end
+	if not idx then
+		error(("Unknown conqueror '%s' for %s. Options: %s"):format(tostring(conqueror), name, table.concat(info.who, ", ")), 0)
+	end
+	return info.t, idx, info.who[idx]
+end
+
+-- the jewel's tree radius (all timeless jewels are Large)
+local function timelessRadiusIndex(name, conqueror)
+	local t = timelessInfo(name, conqueror)
+	local mult = t == 5 and 20 or 1
+	local item = makeTimeless(name, conqueror, data.timelessJewelSeedMin[t] * mult)
+	return item.jewelRadiusIndex or 3
+end
+
+-- other Historic (timeless) jewels in the tree: only one counts at a time
+local function historicJewels(exceptSocket)
+	local build = B()
+	local out = {}
+	for nodeId, itemId in pairs(build.spec.jewels) do
+		local item = build.itemsTab.items[itemId]
+		if nodeId ~= exceptSocket and item and item.baseName == "Timeless Jewel" and build.spec.allocNodes[nodeId] then
+			out[#out + 1] = { socket = nodeId, item = item }
+		end
+	end
+	return out
+end
+
+-- Every seed, in every main-tree socket that is allocated or within p.max_path points: the
+-- notables in its radius and what each seed turns them into, valued on the current build by
+-- p.grad (per-unit weight of each stat, the optimiser's linear score). Unallocated notables in
+-- radius within p.max_pick points are counted when the seed makes them worth their points
+-- (`lambda`, the value of a typical allocated point). Returns the best p.per_socket seeds per
+-- socket; constant effects (small passives, keystones in radius) are left to the trial.
+function API.timeless_scan(p)
+	local build = B()
+	local spec = build.spec
+	local t, conqIdx, conqName = timelessInfo(p.jewel, p.conqueror)
+	if t == 1 then
+		error("Glorious Vanity is not supported by the finder yet (its passives roll values per seed)", 0)
+	end
+	local ri = timelessRadiusIndex(p.jewel, p.conqueror)
+	local calcFunc, base = build.calcsTab:GetMiscCalculator()
+	local grad = {}
+	for stat, w in pairs(p.grad or {}) do
+		if readStat(base, stat) ~= nil then grad[stat] = w end
+	end
+	if next(grad) == nil then error("timeless_scan needs grad = { stat = weight }", 0) end
+	local calcs = 0
+	local function val(override)
+		calcs = calcs + 1
+		local ok, out = pcall(calcWithRemoval, calcFunc, override, false)
+		if not ok then return 0 end
+		local v = 0
+		for stat, w in pairs(grad) do v = v + w * ((readStat(out, stat) or 0) - (readStat(base, stat) or 0)) end
+		return v
+	end
+	-- a typical point's worth: median of allocated small passives that do something
+	local smalls = {}
+	for _, node in pairs(spec.allocNodes) do
+		if node.type == "Normal" and not node.ascendancyName and node.id < 65536 and #smalls < 60 then
+			local v = -val({ removeNodes = { [node] = true } })
+			if v > 1e-9 then smalls[#smalls + 1] = v end
+		end
+	end
+	table.sort(smalls)
+	local lambda = #smalls > 0 and smalls[math.ceil(#smalls / 2)] or 0
+	if p.lambda then lambda = p.lambda end
+
+	local legionNodes, legionAdditions = spec.tree.legion.nodes, spec.tree.legion.additions
+	local nAdd = data.timelessJewelAdditions
+	local fakeId = 990000
+	local function fake(sd, kind)
+		fakeId = fakeId + 1
+		local n = { id = fakeId, type = kind or "Notable", sd = {}, dn = "virtual", name = "virtual", linked = {}, power = {} }
+		for i, line in ipairs(sd) do n.sd[i] = line end
+		spec.tree:ProcessStats(n)
+		return n
+	end
+	local repVal, repName, addVal, addName = {}, {}, {}, {}
+	local function replacement(idx)
+		if repVal[idx] == nil then
+			local L = legionNodes[idx]
+			if not L then repVal[idx] = 0 repName[idx] = "?" return 0 end
+			repVal[idx] = val({ addNodes = { [fake(L.sd)] = true } })
+			repName[idx] = L.dn
+		end
+		return repVal[idx]
+	end
+	local function addition(idx)
+		if addVal[idx] == nil then
+			local A = legionAdditions[idx]
+			if not A then addVal[idx] = 0 addName[idx] = "?" return 0 end
+			addVal[idx] = val({ addNodes = { [fake(A.sd, "Normal")] = true } })
+			addName[idx] = A.dn
+		end
+		return addVal[idx]
+	end
+
+	local wanted
+	if p.sockets and #p.sockets > 0 then
+		wanted = {}
+		for _, id in ipairs(p.sockets) do wanted[tonumber(id)] = true end
+	end
+	local maxPath, maxPick = p.max_path or 8, p.max_pick or 3
+	-- a socket holding another jewel is only a candidate with p.replace_jewels (or when it
+	-- holds a timeless jewel, which this one would replace anyway)
+	local function socketFree(id)
+		if wanted and wanted[id] then return true end
+		local slot = build.itemsTab.slots["Jewel " .. id]
+		local cur = slot and slot.selItemId and slot.selItemId ~= 0 and build.itemsTab.items[slot.selItemId]
+		return not cur or p.replace_jewels or cur.baseName == "Timeless Jewel"
+	end
+	local perSocket = p.per_socket or 4
+	local mult = t == 5 and 20 or 1
+	local seedLo, seedHi = data.timelessJewelSeedMin[t] * mult, data.timelessJewelSeedMax[t] * mult
+	local selfVal = {}
+	local results = {}
+	for id, socket in pairs(spec.nodes) do
+		local cost = socket.alloc and 0 or (socket.path and #socket.path or nil)
+		if socket.type == "Socket" and id < 65536 and not socket.ascendancyName
+			and not (socket.expansionJewel and socket.expansionJewel.parent)
+			and socket.nodesInRadius and socket.nodesInRadius[ri]
+			and cost and cost <= maxPath and (not wanted or wanted[id]) and socketFree(id) then
+			local notables, smallsIn, keystones = {}, 0, {}
+			for nid in pairs(socket.nodesInRadius[ri]) do
+				local n = spec.nodes[nid]
+				if n and not n.ascendancyName and data.nodeIDList[nid] then
+					if n.type == "Notable" and not n.isJewelSocket then
+						local c = n.alloc and 0 or (n.path and #n.path or 99)
+						if n.alloc or c <= maxPick + cost then
+							if selfVal[nid] == nil then
+								selfVal[nid] = n.alloc and -val({ removeNodes = { [n] = true } }) or val({ addNodes = { [n] = true } })
+							end
+							notables[#notables + 1] = { id = nid, node = n, alloc = n.alloc, cost = n.alloc and 0 or math.max(1, c - cost) }
+						end
+					elseif n.type == "Normal" and n.alloc then
+						smallsIn = smallsIn + 1
+					elseif n.type == "Keystone" then
+						keystones[#keystones + 1] = { name = n.dn, alloc = n.alloc or nil }
+					end
+				end
+			end
+			local top = {}
+			local lowest = -math.huge
+			for seed = seedLo, seedHi, mult do
+				local score = 0
+				for _, nt in ipairs(notables) do
+					local tbl = data.readLUT(seed, nt.id, t)
+					local newVal, replaced = nil, false
+					local extra = 0
+					for _, jd in ipairs(tbl) do
+						if jd >= nAdd then
+							newVal = replacement(jd + 1 - nAdd)
+							replaced = true
+						else
+							extra = extra + addition(jd + 1)
+						end
+					end
+					local own = selfVal[nt.id]
+					local total = (replaced and newVal or own) + extra
+					if nt.alloc then
+						score = score + total - own
+					else
+						local g = total - nt.cost * lambda
+						if g > 0 then score = score + g end
+					end
+				end
+				if #top < perSocket or score > lowest then
+					top[#top + 1] = { seed = seed, score = score }
+					table.sort(top, function(a, b) return a.score > b.score end)
+					if #top > perSocket then top[#top] = nil end
+					lowest = top[#top].score
+				end
+			end
+			-- what the best seeds do, notable by notable
+			for _, cand in ipairs(top) do
+				local changes, picks = {}, {}
+				for _, nt in ipairs(notables) do
+					local tbl = data.readLUT(cand.seed, nt.id, t)
+					local becomes, adds, newVal, extra = nil, {}, nil, 0
+					for _, jd in ipairs(tbl) do
+						if jd >= nAdd then
+							local idx = jd + 1 - nAdd
+							newVal = replacement(idx)
+							becomes = repName[idx]
+						else
+							extra = extra + addition(jd + 1)
+							adds[#adds + 1] = addName[jd + 1]
+						end
+					end
+					local own = selfVal[nt.id]
+					local total = (newVal or own) + extra
+					local gain = nt.alloc and (total - own) or (total - nt.cost * lambda)
+					if nt.alloc or gain > 0 then
+						changes[#changes + 1] = { node = nt.node.dn, id = nt.id, allocated = nt.alloc or nil,
+							becomes = becomes, adds = #adds > 0 and adds or nil, cost = nt.alloc and nil or nt.cost,
+							gain = gain }
+						if not nt.alloc then picks[#picks + 1] = nt.id end
+					end
+				end
+				table.sort(changes, function(a, b) return a.gain > b.gain end)
+				cand.changes = changes
+				cand.picks = picks
+			end
+			local slot = build.itemsTab.slots["Jewel " .. id]
+			local cur = slot and slot.selItemId and slot.selItemId ~= 0 and build.itemsTab.items[slot.selItemId]
+			-- a name for the socket: its nearest notable or keystone
+			local near, nearD = nil, math.huge
+			for nid in pairs(socket.nodesInRadius[1] or socket.nodesInRadius[ri]) do
+				local n = spec.nodes[nid]
+				if n and (n.type == "Notable" or n.type == "Keystone") then
+					local dx, dy = (n.x or 0) - (socket.x or 0), (n.y or 0) - (socket.y or 0)
+					local d = dx * dx + dy * dy
+					if d < nearD then near, nearD = n.dn, d end
+				end
+			end
+			results[#results + 1] = { socket = id, near = near, allocated = socket.alloc or nil,
+				pathCost = cost, current = cur and cur.name or nil, notablesInRadius = #notables,
+				allocatedSmallsInRadius = smallsIn, keystonesInRadius = #keystones > 0 and keystones or nil,
+				seeds = top }
+		end
+	end
+	table.sort(results, function(a, b) return (a.seeds[1] and a.seeds[1].score or 0) > (b.seeds[1] and b.seeds[1].score or 0) end)
+	-- the Historic jewel the build already has, if any
+	local current
+	for _, h in ipairs(historicJewels(nil)) do
+		local cb = h.item.jewelData and h.item.jewelData.conqueredBy
+		local who
+		for _, info in pairs(TIMELESS) do
+			for _, w in ipairs(info.who) do
+				for line in (h.item:BuildRaw() or ""):gmatch("[^\n]+") do
+					if line:find(w, 1, true) and line:find("%d") then who = who or w end
+				end
+			end
+		end
+		current = { name = h.item.title or h.item.name, socket = h.socket, seed = cb and cb.id or nil, conqueror = who }
+	end
+	return { jewel = p.jewel, jewelType = t, conqueror = conqName, conquerorIndex = conqIdx, current = current,
+		lambda = lambda, calcs = calcs, sockets = results,
+		tradeIds = data.timelessJewelTradeIDs[t] and data.timelessJewelTradeIDs[t].keystone or nil }
+end
+
+-- Put one timeless jewel in, for real: allocate its socket (and p.picks with their paths),
+-- equip it, calculate. Without p.keep everything is put back as it was.
+function API.timeless_trial(p)
+	local build = B()
+	local spec, itemsTab = build.spec, build.itemsTab
+	local socketId = tonumber(p.socket)
+	local socket = spec.nodes[socketId]
+	if not socket or socket.type ~= "Socket" then error("Not a jewel socket: " .. tostring(p.socket), 0) end
+	local item = makeTimeless(p.jewel, p.conqueror, p.seed)
+	local slot = itemsTab.slots["Jewel " .. socketId]
+	if not slot then error("No item slot for socket " .. socketId, 0) end
+	local state = spec:CreateUndoState()
+	state.secondaryAscendClassId = state.secondaryAscendClassId or spec.curSecondaryAscendClassId
+	local prevSel = slot.selItemId or 0
+	local mainAtStart = build.skillsTab.socketGroupList[build.mainSocketGroup]
+	local used0 = spec:CountAllocNodes()
+	-- another Historic jewel would switch this one off
+	local others = historicJewels(socketId)
+	for _, o in ipairs(others) do itemsTab.slots["Jewel " .. o.socket]:SetSelItemId(0) end
+	if not socket.alloc then spec:AllocNode(socket) end
+	itemsTab:AddItem(item, true)
+	slot:SetSelItemId(item.id)
+	spec:BuildAllDependsAndPaths()
+	local picked = {}
+	for _, id in ipairs(p.picks or {}) do
+		local n = spec.nodes[tonumber(id)]
+		if n and not n.alloc and n.path and #n.path <= (p.max_pick_cost or 6) then
+			spec:AllocNode(n)
+			picked[#picked + 1] = n.dn
+		end
+	end
+	-- notables the jewel made worthless: give their points back if nothing hangs off them
+	local dropped = {}
+	for _, id in ipairs(p.drop or {}) do
+		local n = spec.nodes[tonumber(id)]
+		if n and n.alloc and #n.depends <= 1 then
+			spec:DeallocNode(n)
+			dropped[#dropped + 1] = n.dn
+		end
+	end
+	spec:BuildAllDependsAndPaths()
+	itemsTab:PopulateSlots()
+	local changed = {}
+	for nid in pairs(socket.nodesInRadius[item.jewelRadiusIndex or 3] or {}) do
+		local n = spec.nodes[nid]
+		if n and n.alloc and n.conqueredBy and (n.type == "Notable" or n.type == "Keystone") then
+			changed[#changed + 1] = { id = nid, name = n.dn, mods = table.concat(n.sd or {}, " / ") }
+		end
+	end
+	local vals = {}
+	if p.keep then
+		build.buildFlag = true
+		rebuild()
+		keepMainGroup(mainAtStart)
+		spec:AddUndoState()
+		itemsTab:AddUndoState()
+		local out = output()
+		for _, s in ipairs(p.stats or {}) do vals[s] = num(readStat(out, s)) end
+	else
+		-- a fresh calculation of the changed build (the cached calculator is the old build's)
+		local _, out = build.calcsTab.calcs.getMiscCalculator(build)
+		for _, s in ipairs(p.stats or {}) do vals[s] = num(readStat(out, s)) end
+	end
+	-- a requirement PoB doesn't report is no requirement
+	for _, s in ipairs(p.stats or {}) do
+		if vals[s] == nil and s:match("^Req") then vals[s] = 0 end
+	end
+	local used = spec:CountAllocNodes()
+	if not p.keep then
+		slot:SetSelItemId(prevSel)
+		itemsTab:DeleteItem(item, true)
+		for _, o in ipairs(others) do itemsTab.slots["Jewel " .. o.socket]:SetSelItemId(o.item.id) end
+		spec:RestoreUndoState(state)
+		spec:BuildClusterJewelGraphs()
+		for _, node in pairs(spec.allocNodes) do keepRunegraft(node) end
+		itemsTab:PopulateSlots()
+		build.buildFlag = true
+	end
+	table.sort(changed, function(a, b) return a.name < b.name end)
+	return { stats = vals, used = used, extraPoints = used - used0, picked = picked, dropped = dropped,
+		notables = changed, replaced = (prevSel ~= 0 and itemsTab.items[prevSel]) and itemsTab.items[prevSel].name or nil,
+		otherHistoric = #others > 0 and others[1].item.name or nil, seed = tonumber(p.seed), socket = socketId }
 end
 
 -- Set the whole tree at once: p.nodes = node ids (the model's nodes to allocate),

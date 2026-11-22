@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `find_timeless_jewel`: the best seed and socket for a timeless jewel and conqueror (Lethal
+  Pride, Brutal Restraint, Militant Faith, Elegant Hubris, Heroic Tragedy). Every seed is
+  scanned in every free socket near the tree (seconds), the best are checked by PoB, and by
+  default the top two get the tree rebuilt around them within the current points and are
+  compared with the same rebuild without the jewel. Gives the notables each seed creates, a
+  verdict (including "keep your current one"), and trade links with the exact or any conqueror.
+- The optimiser's attribute check follows the requirement in force, so a jewel or keystone
+  that changes requirements (Supreme Ostentation) is scored correctly.
+
 ## 0.5.2
 
 `optimize_tree`

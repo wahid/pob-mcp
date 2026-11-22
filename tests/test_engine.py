@@ -568,3 +568,42 @@ def test_unique_upgrades(deadeye):
     for u in res["upgrades"]:
         assert u["slot"] == "Ring 2" and u["score"] >= 0.5
         assert all(v >= -5 for v in u["pct"].values())
+
+
+def test_timeless_scan_and_trial(occ):
+    """Every seed in the free sockets near the tree is scanned; a trial puts everything back."""
+    before = occ.call("stats", {"keys": ["CombinedDPS", "TotalEHP", "Life"]})
+    assert before["CombinedDPS"] > 0
+    used = occ.call("summary")["passivePointsUsed"]
+    grad = {"CombinedDPS": 50 / before["CombinedDPS"], "TotalEHP": 50 / before["TotalEHP"]}
+    scan = occ.call("timeless_scan", {"jewel": "Elegant Hubris", "conqueror": "Cadiro", "grad": grad,
+                                          "max_path": 8, "per_socket": 2})
+    assert scan["sockets"] and scan["tradeIds"] and scan["conquerorIndex"] == 1
+    for s in scan["sockets"]:
+        assert s["pathCost"] <= 8 and len(s["seeds"]) <= 2
+        assert s.get("current") is None  # sockets holding jewels are skipped by default
+        for c in s["seeds"]:
+            assert 2000 <= c["seed"] <= 160000 and c["seed"] % 20 == 0
+    s = scan["sockets"][0]
+    c = s["seeds"][0]
+    tr = occ.call("timeless_trial", {"jewel": "Elegant Hubris", "conqueror": "Cadiro", "seed": c["seed"],
+                                         "socket": s["socket"], "picks": c["picks"],
+                                         "stats": ["CombinedDPS", "TotalEHP", "ReqStr"]})
+    assert tr["extraPoints"] >= s["pathCost"]
+    assert any(n["name"] for n in tr["notables"]) or s["notablesInRadius"] == 0
+    assert "ReqStr" in tr["stats"]
+    assert occ.call("summary")["passivePointsUsed"] == used
+    assert occ.call("stats", {"keys": ["CombinedDPS", "TotalEHP", "Life"]}) == before
+
+
+def test_find_timeless_quick(occ):
+    from pob_mcp.timeless import find, resolve
+    assert resolve("elegant hubris", "cadiro") == ("Elegant Hubris", "Cadiro")
+    with pytest.raises(ValueError):
+        resolve("Elegant Hubris", "Kaom")
+    used = occ.call("summary")["passivePointsUsed"]
+    res = find(occ, "Lethal Pride", "Kaom", rebuild=0, trials=2, max_path=8, apply=False, league="Standard")
+    assert res["best"]["seed"] and 10000 <= res["best"]["seed"] <= 18000
+    assert res["best"]["trade"].startswith("https://www.pathofexile.com/trade/search/Standard/")
+    assert res["verdict"]
+    assert occ.call("summary")["passivePointsUsed"] == used

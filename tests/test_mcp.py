@@ -32,7 +32,7 @@ def test_server_over_stdio(sample_xml):
                 for expected in ("load_build", "compare_changes", "find_routes", "fix_gaps",
                                  "render_tree", "plan_leveling", "trade_search", "rank_anoints",
                                  "list_cluster_jewel_options", "list_saved_builds", "list_item_sets",
-                                 "optimize_tree", "budget_upgrades"):
+                                 "optimize_tree", "budget_upgrades", "find_timeless_jewel"):
                     assert expected in names
 
                 res = await s.call_tool("load_build", {"source": sample_xml})

@@ -110,7 +110,7 @@ class TreeOptimizer:
     history: list = field(default_factory=list)
 
     # -- PoB side ---------------------------------------------------------------------
-    def _measure(self):
+    def _measure(self, base_only=False):
         stats = [self.metric or "@dps", "TotalEHP", *HITS,
                  "Str", "Dex", "Int", "ManaUnreserved", "LifeUnreserved",
                  *(self.targets or {}).keys()]
@@ -126,13 +126,16 @@ class TreeOptimizer:
                 req.append(s)
         params = {"stats": req, "lenient": True, "include_keystones": self.include_keystones,
                   "radius": self._reach()}
+        if base_only:
+            params["base_only"] = True
         for k in ("keep", "require", "avoid", "only"):
             if getattr(self, k):
                 params[k] = getattr(self, k)
         if self.mastery_effects:
             params["mastery_effects"] = {str(k): v for k, v in self.mastery_effects.items()}
         t = time.time()
-        model = self.pool.tree_model(params) if self.pool else self.engine.call("tree_model", params)
+        model = (self.pool.tree_model(params) if self.pool and not base_only
+                 else self.engine.call("tree_model", params))
         self.measure_seconds = getattr(self, "measure_seconds", 0.0) + time.time() - t
         self.real_stats = list(model["stats"])
         # virtual stats: capped + overcap
@@ -184,11 +187,21 @@ class TreeOptimizer:
             u += w["hit"] * math.log(max(min(hits), 1.0))
         for c in self.constraints:
             v = stats.get(c.stat)
-            if v is None:
+            target = self._live_target(c, stats)
+            if v is None or target is None:
                 continue
-            short = max(0.0, c.target - v) / c.scale
+            short = max(0.0, target - v) / c.scale
             u -= PENALTY * short
         return u
+
+    @staticmethod
+    def _live_target(c, stats):
+        """An attribute requirement follows the stats when they carry it (a jewel or keystone
+        can change or remove requirements); 0 or missing there means none."""
+        if c.kind == "validity" and c.stat in ("Str", "Dex", "Int") and "Req" + c.stat in stats:
+            req = stats["Req" + c.stat]
+            return float(req) if req else None
+        return c.target
 
     def _target(self, c):
         # the linear model aims a little above a target it has just missed in the real calculation
@@ -198,8 +211,9 @@ class TreeOptimizer:
         out = []
         for c in self.constraints:
             v = stats.get(c.stat)
-            if v is not None and v < c.target - 1e-6:
-                out.append({"stat": c.stat, "value": v, "target": c.target, "kind": c.kind})
+            target = self._live_target(c, stats)
+            if v is not None and target is not None and v < target - 1e-6:
+                out.append({"stat": c.stat, "value": v, "target": target, "kind": c.kind})
         return out
 
     # -- the integer program ------------------------------------------------------------
@@ -747,26 +761,8 @@ class TreeOptimizer:
             "more": len(res) - len(shown) or None,
         }
 
-    def run(self) -> dict:
-        if self.mode not in MODES:
-            raise ValueError(f"mode must be one of dps, balanced, defence (got {self.mode!r})")
-        t_start = self._t_start = time.time()
-        self.measure_seconds = self.solve_seconds = 0.0
-        self._say("measuring the tree")
-        # required picks are allocated up front (with their paths) and then kept fixed
-        if self.require:
-            edits = []
-            for ref in self.require:
-                if isinstance(ref, dict):
-                    edits.append({"op": "allocate_node", "node": ref["node"]})
-                    if ref.get("effect") is not None:
-                        edits.append({"op": "set_mastery", "node": ref["node"], "effect": ref["effect"]})
-                else:
-                    edits.append({"op": "allocate_node", "node": ref})
-            self.engine.call("apply_edits", {"edits": edits})
-            self.keep = list(self.keep or []) + [r["node"] if isinstance(r, dict) else r for r in self.require]
-            self.require = None
-        model = self._measure()
+    def _setup(self, model):
+        """Score inputs from a measured model: main stats, the point budget, constraints."""
         self.stat_names = self.real_stats
         self.dps_stat = model["stats"][0]
         self.hit_stats = [h for h in HITS if h in model["stats"]]
@@ -801,6 +797,36 @@ class TreeOptimizer:
                 cons.append(_Constraint(r, float(base[r]), max(abs(float(base[r])), 1.0), "validity", r + "+overcap"))
         self.constraints = cons
 
+        return base, used
+
+    def prepare(self):
+        """Set up the score on the current build without measuring the tree (for callers that
+        score whole builds, like the timeless jewel finder). Returns the base stats."""
+        model = self._measure(base_only=True)
+        base, _ = self._setup(model)
+        return base
+
+    def run(self) -> dict:
+        if self.mode not in MODES:
+            raise ValueError(f"mode must be one of dps, balanced, defence (got {self.mode!r})")
+        t_start = self._t_start = time.time()
+        self.measure_seconds = self.solve_seconds = 0.0
+        self._say("measuring the tree")
+        # required picks are allocated up front (with their paths) and then kept fixed
+        if self.require:
+            edits = []
+            for ref in self.require:
+                if isinstance(ref, dict):
+                    edits.append({"op": "allocate_node", "node": ref["node"]})
+                    if ref.get("effect") is not None:
+                        edits.append({"op": "set_mastery", "node": ref["node"], "effect": ref["effect"]})
+                else:
+                    edits.append({"op": "allocate_node", "node": ref})
+            self.engine.call("apply_edits", {"edits": edits})
+            self.keep = list(self.keep or []) + [r["node"] if isinstance(r, dict) else r for r in self.require]
+            self.require = None
+        model = self._measure()
+        base, used = self._setup(model)
         start_nodes = [r["id"] for r in model["nodes"] if r["alloc"] and r["type"] != "ClassStart"]
         start_mast = {r["id"]: m["e"] for r in model["nodes"] for m in (r.get("m") or []) if m.get("sel")}
         start_stats = dict(base)

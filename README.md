@@ -76,6 +76,7 @@ for the same build and config.
 | `auto_allocate_passives` | Greedy optimiser: spends points on the notables with the best weighted gain per point, e.g. `{"FullDPS": 1, "TotalEHP": 0.5}`. Optional `targets` (e.g. `{"PhysicalMaximumHitTaken": 10000}`) are met first and never broken afterwards; also picks mastery effects, sockets planned `jewels`, and can `anoint`. `require` forces nodes (or `{node, effect}` masteries) in first, and they stay through LNS |
 | `target_report` | For each target stat: value, slack, cap and over-cap, which allocated picks hold it up, and its modifier sources; tightest first |
 | `optimize_tree` | Exact optimiser for the whole tree: `mode` dps / balanced / defence. PoB measures every node and mastery effect (on several PoB processes, `jobs`), an integer program (HiGHS) picks the best connected tree within the points, PoB recalculates it, repeat. Rebuilds an existing tree as well as filling an empty one; `targets`, `require`, `avoid`, `keep`. `keystones` tries keystones the tree doesn't have and re-optimises around each; `anoint=true` picks the amulet anoint. Reports progress, can be cancelled, and explains the result: each added or removed branch with what it is worth. `apply=false` previews without changing the build |
+| `find_timeless_jewel` | The best seed and socket for a timeless jewel (`jewel="Elegant Hubris"`, `conqueror="Cadiro"`): every seed in every free socket within `max_path` points is valued on the build, the best are checked by PoB, and the top ones get the whole tree rebuilt around them within your points, compared with the same rebuild without the jewel. Returns the notables each seed gives, a verdict and trade links (exact conqueror, or any conqueror for the same seed). Lethal Pride, Brutal Restraint, Militant Faith, Elegant Hubris, Heroic Tragedy |
 | `plan_leveling` | Leveling trees (e.g. levels 30/50/70/90) built from the final tree. Default `method="nested"`: the exact optimiser picks the best tree for each level's points, each stage contains the one before (no respec), masteries included. `method="greedy"` is the older quick planner |
 | `list_tree_specs` | The build's passive tree specs (final tree, leveling trees) |
 | `import_character` | Import a character from a public pathofexile.com profile, or a saved character JSON |
@@ -242,7 +243,7 @@ seconds; if it reaches its time limit, the progress is kept and calling it again
 
 ### Online features
 
-`trade_search`, `price_check`, `budget_upgrades`, `popular_builds`, `load_ladder_build` and `import_character` use the internet; everything else runs
+`trade_search`, `price_check`, `budget_upgrades`, the trade links of `find_timeless_jewel`, `popular_builds`, `load_ladder_build` and `import_character` use the internet; everything else runs
 offline.
 
 - **Prices** come from [poe.ninja](https://poe.ninja/docs/api). Responses are cached for 15
@@ -317,7 +318,7 @@ and weekly against the latest PoB, so a league update that breaks something show
 
 - PoE1 / PoB Community only (not PoB for PoE2).
 - No character import from the PoE website (load a build code or XML instead).
-- Timeless jewel seeds can't be set with the edit ops; edit them in PoB or paste the jewel
+- Glorious Vanity isn't supported by `find_timeless_jewel` yet (its passives roll values per seed); `equip_timeless` can still equip one by seed
   with `equip_item`.
 - `create_rare` with free-text `mods` only warns about mods that can't roll (or errors with
   `strict`); use `affixes` for guaranteed-valid items. Influence, veiled, fractured and essence

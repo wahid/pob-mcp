@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.3
 
 - `find_timeless_jewel`: the best seed and socket for a timeless jewel and conqueror (Lethal
   Pride, Brutal Restraint, Militant Faith, Elegant Hubris, Heroic Tragedy). Every seed is
